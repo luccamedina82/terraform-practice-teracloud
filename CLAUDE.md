@@ -125,3 +125,23 @@ Actualizar al cerrar cada fase.
 **Ojo — todo lo que pida `sudo` o input interactivo lo tenés que correr vos en una terminal
 real**: lo que lanzo yo va sin TTY y se cuelga sin devolver error. Aplica también a
 `terraform apply` sin `-auto-approve`, que pide el `yes` por el mismo canal.
+
+---
+
+## Trabajo en dos máquinas (desde 14-ago-2026)
+
+El repo se sincroniza por GitHub (`luccamedina82/terraform-practice-teracloud`), pero
+**`terraform.tfstate` NO viaja por git** — está en `.gitignore` porque guarda secretos en texto
+plano. Mientras el backend siga siendo `local`, cada máquina tiene su propio estado.
+
+**Regla mientras el backend sea local: aplicar desde UNA SOLA máquina.** Si se corre `apply` en
+la PC A y después en la PC B, la B no sabe que los recursos existen y los crea de nuevo —
+quedan VPCs duplicadas y recursos huérfanos que ningún `destroy` limpia.
+
+Al momento del traspaso el estado tenía **cero recursos managed** (solo los dos data sources),
+así que no había nada que perder. Si eso deja de ser cierto, adelantar la **Fase 3** (migración
+del backend a S3) resuelve el problema de raíz: el estado pasa a estar compartido y con lock.
+
+Requisitos para levantar el trabajo en una máquina nueva: Terraform >= 1.10, credenciales de la
+cuenta `104981180500` en `~/.aws`, y `terraform init` (baja el provider **para esa plataforma** —
+el `.terraform.lock.hcl` hoy solo tiene el hash `h1:` de `linux_amd64`).
