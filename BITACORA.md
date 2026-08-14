@@ -14,6 +14,8 @@ Completar con IDs reales al cerrar cada fase.
 
 | Recurso | Nombre | ID real | Config clave | ¿Genera costo mientras exista? |
 |---|---|---|---|---|
+| Hosted zone Route53 (Fase 1, **leída, no creada** — data source) | `luccamedina.ownboarding.teratest.net.` | `Z0909248Q51XTVKXPOG` (ARN `arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG`) | `private_zone = false`. Preexistente en la cuenta, delegada por NS | No la creó ni la cobra este lab. La zona en sí cuesta ~0,50 USD/mes pero ya existía |
+| AMI Amazon Linux 2023 (Fase 1, **leída, no creada** — data source) | `al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64` | `ami-07a5b367e8dc8bd92` | x86_64 · hvm · ebs · `ena_support` true · `imds_support` v2.0 · `boot_mode` uefi-preferred · owner `137112412989` (alias `amazon`) · **`deprecation_time` 2026-11-01** | No. Es una AMI pública de Amazon |
 | Bucket S3 de estado (Fase 0, **fuera de Terraform**, creado por CLI) | `tf-state-workshop-lm-104981180500` | `arn:aws:s3:::tf-state-workshop-lm-104981180500` | `us-east-1` · versioning `Enabled` · SSE-S3 (`AES256`) con `BucketKeyEnabled` · block public access en los 4 flags · tags `Project`/`ManagedBy`/`Purpose` | Sí, pero despreciable: el bucket en sí no cuesta, solo el almacenamiento del `.tfstate` (unos KB) y sus versiones. Del orden de centavos de USD al mes. **No lo borra `terraform destroy`** — hay que eliminarlo a mano en Fase 9 |
 
 ---
@@ -277,6 +279,97 @@ Properties: se tienen que ver Bucket Versioning = Enabled y Default encryption =
 
 ---
 
+### [Fase 1] — `apply` de data sources: cero recursos creados
+
+```bash
+terraform apply
+```
+
+```
+data.aws_route53_zone.main: Reading...
+data.aws_ami.al2023: Reading...
+data.aws_ami.al2023: Read complete after 2s [id=ami-07a5b367e8dc8bd92]
+data.aws_route53_zone.main: Read complete after 2s [id=Z0909248Q51XTVKXPOG]
+
+Changes to Outputs:
+  + al2023_ami_id          = "ami-07a5b367e8dc8bd92"
+  + al2023_ami_name        = "al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64"
+  + main_route53_zone_arn  = "arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG"
+  + main_route53_zone_id   = "Z0909248Q51XTVKXPOG"
+  + main_route53_zone_name = "luccamedina.ownboarding.teratest.net"
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+**Cómo funciona por debajo:** los data sources se resuelven **en paralelo** — se ve en los dos
+`Reading...` consecutivos antes de cualquier `Read complete`. Terraform no tiene motivo para
+serializarlos porque no hay ninguna referencia entre ellos, y eso ya es el grafo de dependencias
+trabajando: sin aristas, todo va en paralelo.
+
+**Lectura del output:** `Resources: 0 added, 0 changed, 0 destroyed` con cinco outputs impresos
+**es** el criterio de salida de la fase. Confirma en la práctica que un data source lee y no
+crea: ni la hosted zone ni la AMI existen por causa de este código. La sección se llama
+`Changes to Outputs` y no `Terraform will perform the following actions` precisamente porque no
+hay acciones sobre infraestructura.
+
+---
+
+### [Fase 1] — Anatomía del `terraform.tfstate` recién nacido
+
+```bash
+ls -l terraform.tfstate
+git check-ignore -v terraform.tfstate
+```
+
+```
+-rw-r--r-- 1 lucca lucca 5065 terraform.tfstate
+.gitignore:7:*.tfstate	terraform.tfstate
+```
+
+Cabecera y contenido:
+
+```
+  version: 4
+  terraform_version: 1.15.8
+  serial: 1
+  lineage: 28d49728-1e43-f4d8-8f9d-ef9fa384e9eb
+  recursos en el estado: 2
+  outputs en el estado: 5
+
+  mode=data     type=aws_ami              name=al2023   atributos=44
+  mode=data     type=aws_route53_zone     name=main     atributos=15
+```
+
+**Cómo funciona por debajo — cuatro cosas que se leen acá y en ningún otro lado:**
+
+1. **`mode: data`**, no `managed`. Es la distinción estructural entre leer y crear, y está
+   escrita en el estado. Los recursos que Terraform administra y puede destruir van a aparecer
+   como `managed` a partir de la Fase 2. Un `terraform destroy` no toca las entradas `data`.
+2. **44 atributos guardados para la AMI**, contra los 2 que se expusieron como output. Terraform
+   guarda **todo** lo que leyó, no solo lo que se usa. Ahí está la razón por la que el estado es
+   sensible: no controlás qué queda adentro.
+3. **`serial: 1`** — se incrementa en cada escritura del estado. Es el número que permite
+   detectar escrituras concurrentes.
+4. **`lineage`** — un UUID que identifica *este* estado como linaje. Sobrevive a la migración de
+   backend de la Fase 3: si después del `init -migrate-state` el lineage cambiara, significaría
+   que se creó un estado nuevo en vez de haberse movido el existente.
+
+**Verificación de seguridad:** `git check-ignore` confirma que la regla `*.tfstate` de la línea
+7 del `.gitignore` lo está tomando. El archivo con 44 atributos de infraestructura leída no entra
+al repo.
+
+**Datos útiles que quedaron en el estado para fases siguientes:**
+
+| Atributo | Valor | Dónde importa |
+|---|---|---|
+| `imds_support` | `v2.0` | Fase 6: la AMI exige IMDSv2, hay que tenerlo en cuenta si el `user_data` consulta metadata |
+| `root_device_name` | `/dev/xvda` | Fase 6, si se toca el `root_block_device` |
+| `virtualization_type` / `ena_support` | `hvm` / `true` | Compatible con `t3.micro` |
+| `deprecation_time` | `2026-11-01T17:47:00Z` | La AMI se deprecia en ~3 meses; irrelevante para este lab pero es el tipo de cosa que rompe un pipeline meses después |
+| `image_owner_alias` | `amazon` | Confirma que es oficial y no de un tercero que se llamó igual |
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -421,6 +514,74 @@ Un bloque por problema **realmente ocurrido**. No hipotéticos.
 
 ---
 
+### `terraform apply` falla por plugins no instalados, con el `init` recién hecho y OK
+
+- **Fase**: 1
+
+- **Síntoma**: `terraform apply` corrido desde PowerShell en Windows, minutos después de un
+  `init` exitoso y un `plan` verde:
+
+  ```
+  Error: Required plugins are not installed
+
+  The installed provider plugins are not consistent with the packages selected
+  in the dependency lock file:
+    - registry.terraform.io/hashicorp/aws: there is no package for
+      registry.terraform.io/hashicorp/aws 6.60.0 cached in .terraform\providers
+
+  To download the plugins required for this configuration, run:
+    terraform init
+  ```
+
+- **Hipótesis descartadas**:
+  - *`init` incompleto o corrupto*: descartada, el `plan` inmediatamente anterior había leído
+    los dos data sources sin problema.
+  - *Versión del provider mal resuelta*: descartada, el lock fija `6.60.0` y es la que está
+    instalada.
+  - **La pista del mensaje**: `.terraform\providers` con **barra invertida**. El error lo estaba
+    reportando un Terraform de Windows, no el de WSL.
+
+- **Causa raíz**: el `apply` se corrió desde **PowerShell** y no desde WSL. Los plugins de
+  provider son **binarios compilados por plataforma**, no código portable. El `init` se había
+  hecho desde WSL, así que en `.terraform/providers/.../6.60.0/` existía únicamente el
+  subdirectorio `linux_amd64`. El binario de Windows buscaba `windows_amd64` y no lo encontraba.
+
+  Se confirma también en el lock file, que tiene **un solo hash `h1:`**:
+
+  ```
+  "h1:VF6oe4urgR2lRZuCAytMHvUZHtqcZU99TGw915LdCL0="
+  ```
+
+  Los 16 `zh:` son los checksums firmados que publica el registry para todas las plataformas,
+  pero el `h1:` corresponde al paquete de **la plataforma que instaló el `init`**. Solo figuraba
+  Linux, así que ni siquiera con el binario descargado habría validado en Windows.
+
+- **Fix aplicado**: correr el `apply` desde WSL, sobre el mismo directorio:
+
+  ```bash
+  wsl -d Ubuntu --cd /mnt/c/Users/lucca/desktop/teracloud/terraform -- terraform apply
+  ```
+
+  **Descartado a propósito**: correr `terraform init` desde Windows. Habría funcionado, pero
+  descarga otros ~840 MB y agrega un segundo `h1:` al lock file, ensuciando el diff. Si alguna
+  vez hace falta que el repo funcione en las dos plataformas, la forma correcta es declararlo,
+  en vez de que dependa de dónde se corrió `init` por casualidad:
+
+  ```bash
+  terraform providers lock -platform=linux_amd64 -platform=windows_amd64
+  ```
+
+- **Lección**: `.terraform/` **no es portable** — es caché de binarios específicos de un sistema
+  operativo, y esa es la razón de fondo por la que va al `.gitignore` (no solo por su tamaño).
+  Corolario para este repo, que vive en `/mnt/c` y es alcanzable desde las dos terminales: el
+  directorio es compartido pero el toolchain no, así que **hay que ser consistente sobre desde
+  dónde se ejecuta**. Y la pista estaba en el propio mensaje de error: una barra invertida en
+  `.terraform\providers` delata qué binario habló.
+
+- **Tiempo aproximado**: ~10 min.
+
+---
+
 ## 4. Decisiones tomadas durante la ejecución
 
 Las que no estaban en `DISENO.md` o que lo contradicen. Incluir explícitamente las que
@@ -429,6 +590,9 @@ cambiaron de opinión a mitad de camino.
 | Fase | Decisión | Alternativa descartada | Por qué | ¿Contradice el diseño original? |
 |---|---|---|---|---|
 | 0 | Trabajar 100% en WSL Ubuntu 26.04, instalando Terraform ahí | Trabajar 100% en Windows instalando el AWS CLI ahí (Terraform ya estaba en Windows v1.15.8) | El entorno estaba partido: Terraform solo en Windows, AWS CLI solo en WSL. Unificar en WSL mantiene una sola shell para `plan` + verificación por CLI, respeta el entorno que ya venía usando, y evita el riesgo de CRLF del `user-data.sh.tftpl` que ya había mordido en un lab anterior | No — `DISENO.md` §1 ya asumía WSL; el diseño no había registrado que Terraform no estaba instalado ahí |
+| 1 | Fijar la línea de kernel en el filtro de la AMI: `al2023-ami-2023.*-kernel-6.1-x86_64` | Dejar `kernel-*` y que `most_recent` eligiera la más nueva | Las tres líneas de kernel (6.1, 6.12, 6.18) del mismo build tienen **idéntico `CreationDate`**, al segundo. Con empate, `most_recent` no tiene criterio y el ganador depende del orden en que la API devolvió los resultados: no elige la más nueva, tira una moneda. Verificado en vivo — el `plan` de Terraform resolvió a kernel-6.1 mientras un `sort_by` del CLI sobre los mismos datos resolvía a kernel-6.18 | No — el diseño no especificaba el filtro |
+| 1 | Filtro acotado con `al2023-ami-2023.` como prefijo | Patrón amplio tipo `al2023-ami-*x86_64*` | El punto después de `2023` es lo que excluye las variantes `minimal`, `ecs`, `ecs-gpu` y `ecs-neuron`. Con el patrón amplio hay 327 matches y la más reciente por fecha era `al2023-ami-ecs-neuron-hvm-...`: habría levantado sin error y con Docker preinstalado, o sea que el problema no se habría notado nunca | No |
+| 1 | Output `al2023_ami_name` además del `id` | Solo el `id` | `ami-07a5b367e8dc8bd92` no es legible; el `name` dice qué build y qué línea de kernel se seleccionó realmente. Es el dato que va a la tabla de trazabilidad de la documentación final | No — agrega al diseño, no lo contradice |
 | 0 | `.gitattributes` **y** `.editorconfig`, los dos | Solo `.gitattributes`, que era el reflejo inicial | Actúan en momentos distintos y ninguno cubre al otro: `.gitattributes` normaliza en `commit`/`checkout`, `.editorconfig` en el guardado del editor. `templatefile()` lee **el archivo del disco**, no el índice de Git, así que un `.tftpl` escrito con CRLF por el editor llega con retorno de carro al `user_data` aunque el repo lo tenga en LF | No — el diseño identificaba el riesgo de CRLF pero no la mitigación |
 | 0 | `backend "local" {}` declarado explícitamente en vez de omitir el bloque | Dejar el backend local implícito (comportamiento idéntico) | Funcionalmente son equivalentes, pero el explícito hace que la migración de Fase 3 sea un diff de una línea (`"local"` → `"s3"`) en vez de la aparición de un bloque de la nada. Además Terraform recién entonces escribe `.terraform/terraform.tfstate` con el `hash` del backend, que es contra lo que compara para detectar el cambio y ofrecer migrar el estado | No — el diseño pedía backend local en Fase 0-2, no decía cómo expresarlo |
 | 0 | `.terraform.lock.hcl` **se commitea** | Ignorarlo, como hace el enunciado del workshop | Lo zanjó el output del propio `terraform init`: *"Include this file in your version control repository so that Terraform can guarantee to make the same selections by default"*. Sin él, otro `init` puede resolver un provider distinto dentro de `~> 6.0` | Sí, contradice el enunciado — divergencia deliberada y documentada. Cierra el riesgo de `DISENO.md` §6 |
@@ -455,6 +619,50 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 ## 6. Conceptos nuevos de Terraform
 
 Explicados en criollo, como se los contaría a alguien. Prioridad a lo contraintuitivo.
+
+### Data source vs. resource, y por qué `most_recent` no es lo que parece
+
+- **Qué es**: un `data` lee infraestructura que ya existe; un `resource` la crea y la administra.
+  La diferencia queda escrita en el estado como `"mode": "data"` contra `"mode": "managed"`, y
+  tiene consecuencias: `terraform destroy` no toca las entradas `data`, y un `apply` que solo
+  tiene data sources reporta `0 added, 0 changed, 0 destroyed`.
+
+- **Por qué importa**: es la forma de referirse a cosas que Terraform no administra sin tener que
+  hardcodear IDs. La hosted zone ya existía en la cuenta: hardcodear `Z0909248Q51XTVKXPOG` habría
+  funcionado igual, pero el data source documenta *de dónde sale* ese ID y sobrevive a que la
+  zona se recree.
+
+- **Lo contraintuitivo (esto es lo importante)**: `most_recent = true` **no garantiza un
+  resultado determinista**. Ordena por `CreationDate` y se queda con el primero, pero AWS publica
+  las tres líneas de kernel del mismo build con **el mismo timestamp exacto**:
+
+  ```
+  2026-08-03T17:39:25.000Z   ami-07a5b367e8dc8bd92   ...kernel-6.1-x86_64
+  2026-08-03T17:39:25.000Z   ami-09ea3fdf5cd76c4a0   ...kernel-6.12-x86_64
+  2026-08-03T17:39:25.000Z   ami-0bdc7d025135d7b49   ...kernel-6.18-x86_64
+  ```
+
+  Con empate no hay criterio: gana el que la API haya devuelto primero. Se comprobó en vivo —
+  Terraform resolvió a kernel-6.1 y un `sort_by` del AWS CLI sobre exactamente los mismos datos
+  resolvió a kernel-6.18. La conclusión práctica es que **el filtro tiene que ser lo bastante
+  estrecho como para que `most_recent` no tenga que desempatar nada**.
+
+- **Qué creía antes**: que con poner `owners = ["amazon"]` el data source de AMI ya estaba
+  resuelto. `owners` evita que un tercero te inyecte una imagen, que es el riesgo grave, pero no
+  evita elegir la variante equivocada **del mismo publicador**: con un patrón amplio la más
+  reciente de las 327 era una `ecs-neuron`, que habría arrancado sin dar ningún error.
+
+- **El segundo efecto, que muerde en la Fase 8**: `most_recent = true` significa que el ID puede
+  cambiar solo cuando AWS publica un build nuevo. Como el argumento `ami` de `aws_instance` fuerza
+  reemplazo, un `plan` corrido semanas después puede proponer destruir y recrear la instancia sin
+  que haya cambiado una línea de código.
+
+- **La alternativa que existe y no se usó acá**: AWS publica parámetros SSM que siempre apuntan a
+  la última AMI (`/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64`), leíbles con
+  `data "aws_ssm_parameter"`. No hay patrón que escribir mal ni variante que se cuele. Se mantuvo
+  `aws_ami` con filtros porque el punto didáctico del workshop es entender los filtros.
+
+---
 
 ### El estado y el backend
 

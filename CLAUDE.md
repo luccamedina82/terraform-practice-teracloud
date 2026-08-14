@@ -107,7 +107,7 @@ Actualizar al cerrar cada fase.
 | Fase | Estado |
 |---|---|
 | 0 — Bootstrap (perfil, bucket, repo, provider) | **cerrada** — `init` OK · `plan` "no changes" · `sts` OK · bucket creado y endurecido |
-| 1 — Data sources | pendiente |
+| 1 — Data sources | **cerrada** — `apply` con `0 added` · zone `Z0909248Q51XTVKXPOG` · AMI `ami-07a5b367e8dc8bd92` |
 | 2 — Red | pendiente |
 | 3 — Migración a backend S3 | pendiente |
 | 4 — ECR + push de la imagen | pendiente |
