@@ -1,0 +1,34 @@
+# Directorio de trabajo de Terraform: providers descargados (~840 MB), modulos y cache.
+# Se regenera entero con `terraform init`.
+.terraform/
+
+# Archivos de estado. Guardan en TEXTO PLANO todo lo que Terraform sabe, incluidos
+# secretos que hayan pasado por cualquier recurso. Nunca se versionan.
+*.tfstate
+*.tfstate.*
+terraform.tfstate.d/
+
+# Valores de variables: pueden traer datos de cuenta o credenciales.
+# Se ignora tambien el ejemplo inverso: *.tfvars.example SI se versiona.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Archivos de override, pensados para ajustes locales de una sola maquina.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Logs de crash del CLI.
+crash.log
+crash.*.log
+
+# Plans binarios: pueden contener valores sensibles del estado.
+*.tfplan
+*.tfplan.*
+
+# NO se ignora .terraform.lock.hcl -- ese archivo SE COMMITEA.
+# El propio `terraform init` lo dice: "Include this file in your version control
+# repository so that Terraform can guarantee to make the same selections by default."
+# Fija la version exacta del provider (aqui hashicorp/aws v6.60.0) y sus hashes.

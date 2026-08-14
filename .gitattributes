@@ -1,0 +1,19 @@
+# El repo se edita desde Windows (core.autocrlf = true) y se ejecuta desde WSL.
+# Sin esto, Git convierte a CRLF en el working tree y cualquier script que termine
+# dentro de un user_data llega a la instancia con \r en el shebang: cloud-init busca
+# "/bin/bash\r", no existe, y el script falla en silencio sin error visible.
+#
+# `text=auto eol=lf` = normaliza a LF en el repo Y fuerza LF al hacer checkout.
+* text=auto eol=lf
+
+# Explicito para lo que se ejecuta o se interpola en una maquina Linux.
+*.sh      text eol=lf
+*.tftpl   text eol=lf
+*.tf      text eol=lf
+*.hcl     text eol=lf
+
+# Binarios: que Git no intente normalizar nada.
+*.pdf     binary
+*.zip     binary
+*.png     binary
+*.jpg     binary
