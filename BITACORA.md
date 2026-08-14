@@ -429,6 +429,7 @@ cambiaron de opinión a mitad de camino.
 | Fase | Decisión | Alternativa descartada | Por qué | ¿Contradice el diseño original? |
 |---|---|---|---|---|
 | 0 | Trabajar 100% en WSL Ubuntu 26.04, instalando Terraform ahí | Trabajar 100% en Windows instalando el AWS CLI ahí (Terraform ya estaba en Windows v1.15.8) | El entorno estaba partido: Terraform solo en Windows, AWS CLI solo en WSL. Unificar en WSL mantiene una sola shell para `plan` + verificación por CLI, respeta el entorno que ya venía usando, y evita el riesgo de CRLF del `user-data.sh.tftpl` que ya había mordido en un lab anterior | No — `DISENO.md` §1 ya asumía WSL; el diseño no había registrado que Terraform no estaba instalado ahí |
+| 0 | `.gitattributes` **y** `.editorconfig`, los dos | Solo `.gitattributes`, que era el reflejo inicial | Actúan en momentos distintos y ninguno cubre al otro: `.gitattributes` normaliza en `commit`/`checkout`, `.editorconfig` en el guardado del editor. `templatefile()` lee **el archivo del disco**, no el índice de Git, así que un `.tftpl` escrito con CRLF por el editor llega con retorno de carro al `user_data` aunque el repo lo tenga en LF | No — el diseño identificaba el riesgo de CRLF pero no la mitigación |
 | 0 | `backend "local" {}` declarado explícitamente en vez de omitir el bloque | Dejar el backend local implícito (comportamiento idéntico) | Funcionalmente son equivalentes, pero el explícito hace que la migración de Fase 3 sea un diff de una línea (`"local"` → `"s3"`) en vez de la aparición de un bloque de la nada. Además Terraform recién entonces escribe `.terraform/terraform.tfstate` con el `hash` del backend, que es contra lo que compara para detectar el cambio y ofrecer migrar el estado | No — el diseño pedía backend local en Fase 0-2, no decía cómo expresarlo |
 | 0 | `.terraform.lock.hcl` **se commitea** | Ignorarlo, como hace el enunciado del workshop | Lo zanjó el output del propio `terraform init`: *"Include this file in your version control repository so that Terraform can guarantee to make the same selections by default"*. Sin él, otro `init` puede resolver un provider distinto dentro de `~> 6.0` | Sí, contradice el enunciado — divergencia deliberada y documentada. Cierra el riesgo de `DISENO.md` §6 |
 | 0 | `required_version = ">= 1.10"` (piso mínimo) en vez de `~> 1.10` | Restricción pesimista con techo en 2.0 | El requisito real es solo que `use_lockfile` necesita >= 1.10. Poner `< 2.0` afirmaría algo no verificado. El `~>` sí se mantiene en el provider (`~> 6.0`), porque ese lo instala `init` solo y sin aprobación humana | No |
@@ -549,3 +550,62 @@ Formato exacto que espera la skill de documentación.
 ## 9. Notas sueltas
 
 Cualquier cosa que no entre en las categorías de arriba pero que valga la pena no perder.
+
+### El riesgo de CRLF, desarmado antes de la Fase 6 (con el comando que lo demuestra)
+
+El entorno estaba efectivamente armado para repetir el problema del lab anterior:
+
+```bash
+git config --get core.autocrlf   # -> true
+ls .gitattributes                # -> no existe
+```
+
+```
+warning: in the working copy of '.terraform.lock.hcl', LF will be replaced by CRLF
+```
+
+**Por qué importa en Fase 6, en concreto**: `scripts/user-data.sh.tftpl` pasa por
+`templatefile()` tal cual está en disco y se inyecta en el `user_data` de la EC2. Si tiene
+retorno de carro, `cloud-init` intenta ejecutar `/bin/bash` con un `\r` pegado, no encuentra ese
+binario, y **el script falla sin error visible**: la instancia arranca perfecto, `docker ps` no
+muestra nada, y no hay ninguna pista en la consola de EC2. El síntoma aparece a tres capas de
+distancia de la causa.
+
+**El comando que hay que conocer** — muestra el line ending en el índice (`i/`) y en el working
+tree (`w/`) por separado, que es lo que ningún otro chequeo distingue:
+
+```bash
+git ls-files --eol -- '*.tf'
+```
+
+Antes de la mitigación:
+
+```
+i/lf    w/crlf    attr/text eol=lf    providers.tf
+i/lf    w/crlf    attr/text eol=lf    variables.tf
+i/lf    w/crlf    attr/text eol=lf    versions.tf
+```
+
+Después:
+
+```
+i/lf    w/lf      attr/text eol=lf    providers.tf
+i/lf    w/lf      attr/text eol=lf    variables.tf
+i/lf    w/lf      attr/text eol=lf    versions.tf
+```
+
+**Lo importante de esa tabla**: el índice ya estaba en LF con solo `.gitattributes` — la
+normalización de Git funcionaba. Lo que seguía en CRLF era **el archivo del disco**, escrito por
+el editor. Y el disco es exactamente lo que lee `templatefile()`. Por eso hacen falta las dos
+piezas y no alcanza con la de Git, que fue la conclusión apurada inicial.
+
+Para renormalizar archivos que ya están en el working tree con el final de línea equivocado, no
+alcanza con `git checkout` — Git los considera sin cambios porque tras normalizar son idénticos.
+Hay que forzarlo borrando y recuperando:
+
+```bash
+rm providers.tf variables.tf versions.tf && git checkout -- providers.tf variables.tf versions.tf
+```
+
+**Chequeo obligatorio antes del `apply` de la Fase 6**: `file scripts/user-data.sh.tftpl` no
+tiene que decir `with CRLF line terminators`.

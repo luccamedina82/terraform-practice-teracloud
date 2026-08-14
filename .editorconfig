@@ -1,0 +1,20 @@
+# Complementa a .gitattributes. Este actua sobre el EDITOR al guardar; el otro
+# sobre Git al commitear y al hacer checkout. Hacen falta los dos: templatefile()
+# lee el archivo del disco, no el indice de Git, asi que un .tftpl guardado con
+# CRLF por el editor llega con retorno de carro al user_data aunque el repo lo
+# tenga normalizado.
+
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+trim_trailing_whitespace = true
+
+[*.{tf,tfvars,hcl,tftpl,sh}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
