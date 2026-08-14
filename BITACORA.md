@@ -370,6 +370,90 @@ al repo.
 
 ---
 
+### [Fase 2] — `plan` de la red completa: 10 recursos, ninguno aplicado todavía
+
+Config agregada en esta fase: `locals.tf` (nombre derivado), `network.tf` (VPC, 2 subnets, IGW,
+route table, association, SG + 3 reglas), 4 variables nuevas y 4 outputs nuevos.
+
+```bash
+terraform fmt && terraform validate && terraform plan
+```
+
+```
+Success! The configuration is valid.
+
+Plan: 10 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + al2023_ami_id              = "ami-07a5b367e8dc8bd92"
+  + al2023_ami_name            = "al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64"
+  + instance_security_group_id = (known after apply)
+  + main_route53_zone_arn      = "arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG"
+  + main_route53_zone_id       = "Z0909248Q51XTVKXPOG"
+  + main_route53_zone_name     = "luccamedina.ownboarding.teratest.net"
+  + private_subnet_id          = (known after apply)
+  + public_subnet_id           = (known after apply)
+  + vpc_id                     = (known after apply)
+```
+
+Extracto de un recurso, para ver los dos campos que importan:
+
+```
+  # aws_subnet.public will be created
+  + resource "aws_subnet" "public" {
+      + availability_zone       = "us-east-1a"
+      + cidr_block              = "10.0.1.0/24"
+      + map_public_ip_on_launch = true
+      + vpc_id                  = (known after apply)
+      + tags                    = {
+          + "Name" = "subnet-public-tf-workshop-lm"
+        }
+      + tags_all                = {
+          + "Environment" = "dev"
+          + "ManagedBy"   = "Terraform"
+          + "Name"        = "subnet-public-tf-workshop-lm"
+          + "Repository"  = "terraform-practice-teracloud"
+        }
+    }
+```
+
+**Cómo funciona por debajo — dos lecturas:**
+
+1. **`(known after apply)` es el grafo de dependencias hecho visible.** Casi todos los `vpc_id`
+   aparecen así porque el ID todavía no existe: AWS lo asigna al crear la VPC. Ese "no lo sé aún"
+   es justamente lo que **obliga** al orden de creación — Terraform no puede crear la subnet antes
+   de tener con qué llenar el campo. Por eso no hace falta ningún `depends_on`: el orden del
+   `DISENO.md` §4 se cumple solo, derivado de las referencias.
+2. **`tags` vs `tags_all`**: `tags` es lo que se declaró en el recurso; `tags_all` es el resultado
+   final con los `default_tags` del provider ya mezclados. Los cuatro tags aparecen en los 10
+   recursos sin haberlos escrito 10 veces. Si un recurso declarara `Environment`, el suyo pisaría
+   al del provider.
+
+**Estado al cierre de la sesión**: el `apply` **no se corrió**. Verificado contra AWS que la cuenta
+sigue limpia:
+
+```bash
+aws ec2 describe-vpcs --region us-east-1 --query 'Vpcs[].{id:VpcId,cidr:CidrBlock,default:IsDefault}'
+```
+
+```json
+[
+    {
+        "id": "vpc-08bacc1ca6a59f5dc",
+        "cidr": "172.31.0.0/16",
+        "default": true
+    }
+]
+```
+
+Solo la VPC default de la cuenta. Ningún recurso del workshop existe todavía.
+
+`CAPTURA PENDIENTE -- consola de VPC, us-east-1, vista Your VPCs filtrada por tag Name =
+vpc-tf-workshop-lm: se tiene que ver la VPC 10.0.0.0/16 con sus 4 tags; y en Subnets, las dos
+subnets con su AZ distinta (us-east-1a / us-east-1b)`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -582,6 +666,47 @@ Un bloque por problema **realmente ocurrido**. No hipotéticos.
 
 ---
 
+### El `plan` de la Fase 2 aborta: `invalid value for name (cannot begin with sg-)`
+
+- **Fase**: 2
+
+- **Síntoma**: el `plan` planificó bien 6 de los 10 recursos y después cortó:
+
+  ```
+  Error: invalid value for name (cannot begin with sg-)
+
+    with aws_security_group.instance,
+    on network.tf line 60, in resource "aws_security_group" "instance":
+    60:   name        = "sg-instance-${local.name}"
+  ```
+
+- **Causa raíz**: AWS **reserva el prefijo `sg-`** para los IDs de security group, así que ningún
+  SG puede llamarse así. El nombre venía de aplicar la convención de nombres del `DISENO.md` §3
+  (`sg-instance-tf-workshop-lm`) sin distinguir dos cosas distintas que se llaman igual: el
+  argumento **`name`** (nombre real del objeto en AWS, con reglas de formato) y el tag **`Name`**
+  (etiqueta libre, sin restricciones).
+
+- **Fix aplicado**: `name = "instance-${local.name}"`, dejando el tag `Name = "sg-instance-${local.name}"`
+  intacto. La convención visual se conserva donde importa —la consola muestra el tag— y el
+  argumento restringido cede.
+
+- **Detalle que vale la pena**: el error lo tiró **`plan`, no `apply`**, y sin haber llamado a la
+  API de AWS. Es una validación que el provider trae escrita adentro, y por eso los 6 recursos
+  anteriores sí llegaron a planificarse: Terraform valida y planifica recurso por recurso, y
+  reporta el problema junto con el plan parcial en vez de abortar en seco. Un `validate` no lo
+  había agarrado antes porque la expresión `"sg-instance-${local.name}"` recién tiene un valor
+  concreto que revisar cuando se evalúan las variables, en `plan`.
+
+- **Lección**: cuando un recurso tiene un argumento `name` **y** un tag `Name`, no son lo mismo y
+  casi nunca tienen las mismas reglas. El `name` es un identificador con validaciones del servicio
+  (longitud, prefijos reservados, unicidad por cuenta/región); el tag es texto libre. Aplicar una
+  convención de nombres a ciegas sobre los dos campos es la forma rápida de encontrarse esto.
+
+- **Tiempo aproximado**: ~3 min. Va igual a la bitácora, por debajo de la regla de los 10 minutos,
+  porque la distinción `name` vs. tag `Name` se repite en ECR (Fase 4) y en IAM (Fase 5).
+
+---
+
 ## 4. Decisiones tomadas durante la ejecución
 
 Las que no estaban en `DISENO.md` o que lo contradicen. Incluir explícitamente las que
@@ -601,6 +726,12 @@ cambiaron de opinión a mitad de camino.
 | 0 | Terraform instalado como binario en `~/.local/bin`, no por `apt` | Repo de HashiCorp vía `apt` (el método oficial recomendado) | El `apt` exige `sudo` y todo lo que se lanza desde Claude Code va sin TTY, así que la password no se puede tipear. El binario no necesita root y conserva la misma garantía verificando firma GPG + SHA256 a mano. Contra: las actualizaciones son manuales — irrelevante acá porque `required_version` en `versions.tf` pinea la versión igual | No — el diseño no fijaba método de instalación |
 | 0 | Repo en `/mnt/c/Users/lucca/desktop/teracloud/terraform`, no en el home de WSL | Mover el repo a `~/` dentro de WSL (mejor performance de I/O) | Los archivos se editan desde Windows y se ejecuta desde WSL sobre el mismo path montado; mover el repo partiría el trabajo entre dos filesystems. El volumen de este lab no justifica el overhead de `/mnt/c` | No — el diseño no se pronunciaba |
 | 0 | Commitear el borrado de los archivos del lab anterior en `main` | Reinicializar el repo desde cero descartando el historial | El historial deja registro de que la infra anterior existió y se eliminó a propósito; reinicializar lo perdía. Commit `4cb46a0`, 8 archivos, 273 líneas eliminadas | No |
+| 2 | CIDR de subnets y AZ como variables (`public_subnet_cidr`, `private_subnet_cidr`, `public_subnet_az`, `private_subnet_az`) | Hardcodear `"10.0.1.0/24"` y `"us-east-1a"` en el recurso | Criterio adoptado: **todo valor que cambiaría entre entornos va a `variables.tf`**. `vpc_cidr` ya seguía esa regla desde la Fase 0; dejar las subnets hardcodeadas habría sido incoherente dentro del mismo archivo. Descartado también `data "aws_availability_zones"`: agrega un data source que el diseño no previó para un lab de una sola AZ útil | No — `DISENO.md` §3 fijaba los valores, no cómo expresarlos |
+| 2 | Ruta a internet como bloque `route {}` **inline** dentro de `aws_route_table` | `aws_route` como recurso separado, por simetría con la decisión #4 de `CLAUDE.md` (reglas de SG separadas) | Parecen el mismo caso y no lo son. En el SG, los bloques inline **borran las reglas que agregó cualquier otro** y el provider v6 empuja a los recursos separados. En una route table que Terraform crea y posee entera, con una sola ruta, el inline es más legible y no tiene ese riesgo; `aws_route` gana cuando hay que agregar rutas a una tabla de otro módulo. Lo que nunca hay que hacer es mezclar los dos estilos en la misma tabla: se pisan en cada `apply` | No — el diseño no se pronunciaba sobre el estilo de la ruta |
+| 2 | Regla de egress declarada explícitamente aunque "permitir todo" suene al default | Omitirla y confiar en el allow-all que AWS pone solo | La doc del provider lo dice al revés de lo que uno espera: *"By default, AWS creates an `ALLOW ALL` egress rule (...) Terraform will remove this default rule, and require you specifically re-create it"*. Sin la regla explícita el SG queda con **salida cero** | No — el diseño ya la listaba (recurso #10); acá se documenta *por qué* es obligatoria |
+| 2 | SG con `name` fijo en vez de `name_prefix` | `name_prefix` + `create_before_destroy` | Cambiar el `name` fuerza reemplazo del SG, y AWS no deja borrar un SG en uso: con la EC2 adjunta (Fase 6) el reemplazo se traba. `name_prefix` + `create_before_destroy` es el patrón de producción. Acá el nombre sale de variables que no se van a tocar, así que el riesgo no se materializa | No |
+| 2 | Outputs solo para VPC, las dos subnets y el SG | Exportar también IGW, route table y association | Un output existe para que alguien lo consuma: el humano que verifica, un comando, u otra fase. Los IDs de IGW/RT/association no los referencia nadie y su efecto se verifica mirando la ruta, no el ID. Un output que nadie lee es ruido en cada `apply` | No |
+| 2 | Cambio de modalidad de trabajo: Claude escribe el HCL paso a paso explicando cada campo antes de pegarlo; yo aprendo revisando | Seguir escribiendo yo el HCL con Claude revisando (modalidad de las Fases 0-2) | Escribir a ciegas contra la doc frenaba el avance sin agregar entendimiento: el cuello de botella no era teclear HCL sino saber qué campos existen y cuáles son las trampas. La explicación *antes* de cada bloque, más el `fmt`/`validate` por paso, conserva el objetivo original (entender cada campo). Registrado en `CLAUDE.md` | Sí — contradice la regla "escribo yo el HCL, vos revisás" de `CLAUDE.md`, que queda reemplazada desde el 14-ago-2026 |
 
 ---
 
@@ -613,6 +744,9 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | Usuario IAM personal con `AdministratorAccess` y access keys estáticas de larga vida | Lo pide el enunciado del workshop. Verificado en Fase 0: política adjunta directa, sin permissions boundary y sin SCPs (cuenta standalone) — o sea, permiso total y sin ningún techo | OIDC federation desde el CI/CD hacia un rol con permisos mínimos por servicio; cero credenciales estáticas. Contradice de frente el criterio de OIDC del Workshop 5 |
 | Cuenta AWS fuera de una organización, sin SCPs | Cuenta de lab individual | Cuenta miembro de una organización con SCPs como red de contención: restricción de regiones habilitadas, prohibición de borrar CloudTrail/logs, y bloqueo de acciones IAM privilegiadas fuera del pipeline |
 | Las mismas access keys replicadas en `~/.aws` de WSL y de Windows (3 perfiles, misma key `...PD7H`) | Comodidad de tener las credenciales disponibles desde cualquiera de las dos shells | Credenciales de corta duración vía SSO / `assume-role`, nunca material estático duplicado en varios filesystems. Cada copia es una superficie más de la que se puede filtrar |
+| Puerto 8080 abierto a `0.0.0.0/0` en el SG | Debug: si el juego no responde en 80, permite aislar si el problema es el contenedor o el mapeo `-p 80:<puerto>` del `docker run`. Con el mapeo bien hecho, la regla es innecesaria incluso en el lab | El puerto de la aplicación nunca se expone a internet. Solo 443 desde el ALB, y el tráfico al puerto de la app queda dentro del SG del backend, con `referenced_security_group_id` en vez de un CIDR |
+| Egress abierto a todo destino (`ip_protocol = "-1"`, `0.0.0.0/0`) | La instancia necesita salir a ECR, a los repos de `yum` y a los endpoints de SSM, y enumerar esos destinos a mano en un lab no aporta | VPC endpoints (interface) para ECR, S3 y SSM, con egress restringido a esos endpoints y a `prefix_list_id` de S3. La instancia deja de necesitar salida a internet |
+| SG con `name` fijo en vez de `name_prefix` + `create_before_destroy` | El nombre sale de variables que no se tocan durante el lab | `name_prefix` + `create_before_destroy`: un cambio de nombre en un SG adjunto a instancias se traba porque AWS no permite borrar un SG en uso |
 
 ---
 
@@ -739,11 +873,81 @@ Explicados en criollo, como se los contaría a alguien. Prioridad a lo contraint
 
 ---
 
+### Una subnet no es pública por un flag: lo público se arma con tres piezas y una omisión
+
+- **Qué es**: "subnet pública" no es un atributo de AWS. No existe ningún campo `public = true`.
+  Es el resultado de tres recursos combinados: un **IGW** adjunto a la VPC, una **route table** con
+  `0.0.0.0/0 → igw`, y una **association** que le pega esa tabla a la subnet.
+  `map_public_ip_on_launch` no participa: solo hace que las instancias reciban IP pública, que sin
+  ruta al IGW no sirve para nada.
+
+- **Lo contraintuitivo**: **la subnet privada es privada por lo que falta, no por lo que se
+  declaró.** No tiene ningún recurso propio que la haga privada. Al no asociarla a ninguna tabla,
+  cae en la **main route table** de la VPC — que AWS crea sola, que este código no administra, y
+  que solo tiene la ruta `local`. Sin `0.0.0.0/0`, no hay salida. Se puede adoptar esa tabla con
+  `aws_default_route_table` si hiciera falta gobernarla; acá se deja en paz a propósito.
+
+- **La otra ruta que no está escrita**: toda route table trae `10.0.0.0/16 → local` (el CIDR de la
+  VPC) puesta por AWS, imposible de borrar y ausente del `plan`. Es la que hace que las dos subnets
+  se hablen entre sí sin configurar nada. Cuando en la Fase 8 se compare el `plan` contra la
+  consola, esa ruta va a estar en la consola y no en el código: no es drift.
+
+- **Qué creía antes**: que `map_public_ip_on_launch = true` era lo que definía a la subnet como
+  pública. Es al revés — es el único de los cuatro elementos que **no** aporta conectividad;
+  aporta la dirección con la que la conectividad, si existe, se puede usar desde afuera.
+
+---
+
+### El security group niega por defecto, y Terraform es más estricto que la consola
+
+- **Qué es**: un SG es un firewall **con estado** (la respuesta a una conexión permitida sale sola,
+  sin regla de vuelta) y **solo permite**: no existen reglas de `deny`. Todo lo que no está
+  explícitamente permitido, queda denegado.
+
+- **Lo contraintuitivo, y es una trampa cara**: crear un SG por la API de AWS agrega solo una regla
+  de egress **allow all**. Terraform la saca. Textual de la doc del provider:
+
+  > "By default, AWS creates an `ALLOW ALL` egress rule when creating a new Security Group inside
+  > of a VPC. When creating a new Security Group inside a VPC, Terraform will remove this default
+  > rule, and require you specifically re-create it if you desire that rule."
+
+  O sea que un `aws_security_group` sin egress declarado queda con **salida cero**, al revés de lo
+  que pasa si lo creás por consola. El modo de falla es el peor de todos: la EC2 de la Fase 6
+  arranca perfecto, el `user_data` no puede hacer `docker pull` ni `yum`, y desde afuera no hay
+  ningún error que mire al SG. Mismo patrón que el riesgo del CRLF: el síntoma aparece a tres
+  capas de la causa.
+
+- **Por qué las reglas separadas se pueden taguear y las inline no**: cada
+  `aws_vpc_security_group_ingress_rule` es un objeto real de AWS con su propio ID (`sgr-...`),
+  visible en el `plan` como `security_group_rule_id`. Las reglas inline no eran objetos: vivían
+  adentro del SG. Por eso ahora Terraform rastrea cada regla por separado, los diffs son
+  quirúrgicos, y una regla agregada a mano por otro no se borra sola en el próximo `apply`.
+
+- **Regla práctica**: una sola fuente por regla — `cidr_ipv4`, `cidr_ipv6`, `prefix_list_id` o
+  `referenced_security_group_id`, exactamente uno. Dos orígenes son dos recursos. Y con
+  `ip_protocol = "-1"` no van `from_port`/`to_port`: el concepto de puerto no aplica cuando el
+  protocolo es "todos".
+
+---
+
 ## 7. Preguntas que me hice y su respuesta
 
 Las del tipo "¿por qué no simplemente X?". Son las que después permiten defender las decisiones.
 
-### ¿...?
+### ¿Por qué `vpc_id` va siempre en la primera línea del recurso? ¿El orden significa algo?
+
+No, **HCL no le da ningún significado al orden de los argumentos**. Poner `tags` primero da un
+resultado idéntico, y `terraform fmt` alinea los `=` pero **no reordena** nada.
+
+Es convención, la del Registry: primero lo que dice **dónde vive** el recurso (`vpc_id`,
+`security_group_id`), después la configuración (`cidr_block`, `availability_zone`), después los
+flags (`map_public_ip_on_launch`), después los bloques anidados (`route {}`), y `tags` siempre al
+final. La utilidad concreta: leyendo la primera línea de cualquier recurso sabés en qué VPC estás
+parado sin leer el resto.
+
+El caso que confirma la lógica es `aws_route_table_association`, que **no** tiene `vpc_id`: no
+cuelga de la VPC, cuelga de una subnet y de una tabla, y sus dos primeras líneas son exactamente
+esas.
 
 ---
 

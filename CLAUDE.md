@@ -21,8 +21,14 @@ es la herramienta, no AWS.
 ## Cómo trabajo (importante)
 
 - **Guía, no solución.** Quiero entender cada campo antes de escribirlo.
-- **Escribo yo el HCL, vos revisás.** No generes archivos completos sin que los haya pedido
-  explícitamente. Si te pido revisión, señalá qué está mal y por qué, no lo reescribas entero.
+- **Modalidad vigente desde el 14-ago-2026 — "vos escribís, yo aprendo mirando":** escribí vos el
+  HCL, **de a un paso por vez**, y explicá cada campo *antes* de pegarlo. Un paso = un recurso o un
+  grupo chico de recursos que solo tienen sentido juntos (ej.: IGW + route table + association).
+  Después de cada paso: `terraform fmt` + `validate`, y frenar a esperar mi OK antes del siguiente.
+  Esto **reemplaza** la modalidad anterior ("escribo yo el HCL, vos revisás"), que se usó hasta la
+  Fase 2 inclusive. El objetivo no cambió: entender cada campo. Cambió quién teclea.
+- Lo que se explica de cada campo: qué hace, qué pasa si falta, y en qué fase posterior muerde.
+  Las trampas y los defaults implícitos valen más que la descripción del argumento.
 - **En diseño**: preguntas socráticas bienvenidas. **En ejecución/troubleshooting**: respuestas
   directas con la razón incluida, sin una pregunta por cada paso.
 - **Causa raíz antes que workaround.** Si algo falla, quiero saber por qué falló, no solo cómo
@@ -56,7 +62,7 @@ es la herramienta, no AWS.
 | Bucket de estado | `tf-state-workshop-lm-104981180500` (creado por CLI en Fase 0) |
 | Perfil AWS | `default` |
 | Entorno local | WSL Ubuntu 26.04. Terraform v1.15.8 en `~/.local/bin` (binario, no `apt`) |
-| Repo | `/mnt/c/Users/lucca/desktop/teracloud/terraform` — se edita desde Windows, se ejecuta desde WSL |
+| Repo | `/mnt/c/Users/lucca/desktop/teracloud/terraform-practice-teracloud` — se edita desde Windows, se ejecuta desde WSL |
 
 **Ojo con Windows/WSL**: ya me mordió el CRLF en un lab anterior (shebangs corruptos sin error
 visible). Cualquier `.sh` que se escriba acá tiene que quedar en LF.
@@ -108,7 +114,7 @@ Actualizar al cerrar cada fase.
 |---|---|
 | 0 — Bootstrap (perfil, bucket, repo, provider) | **cerrada** — `init` OK · `plan` "no changes" · `sts` OK · bucket creado y endurecido |
 | 1 — Data sources | **cerrada** — `apply` con `0 added` · zone `Z0909248Q51XTVKXPOG` · AMI `ami-07a5b367e8dc8bd92` |
-| 2 — Red | pendiente |
+| 2 — Red | **código completo, sin aplicar** — `validate` OK · `plan` = `10 to add, 0 to change, 0 to destroy` · falta correr el `apply` y verificar por CLI |
 | 3 — Migración a backend S3 | pendiente |
 | 4 — ECR + push de la imagen | pendiente |
 | 5 — IAM | pendiente |
@@ -145,3 +151,22 @@ del backend a S3) resuelve el problema de raíz: el estado pasa a estar comparti
 Requisitos para levantar el trabajo en una máquina nueva: Terraform >= 1.10, credenciales de la
 cuenta `104981180500` en `~/.aws`, y `terraform init` (baja el provider **para esa plataforma** —
 el `.terraform.lock.hcl` hoy solo tiene el hash `h1:` de `linux_amd64`).
+
+### Segundo traspaso — 14-ago-2026, al terminar de escribir la Fase 2
+
+Verificado antes de mover: **la cuenta sigue en cero recursos managed**. `aws ec2 describe-vpcs
+--region us-east-1` devuelve únicamente la VPC default (`vpc-08bacc1ca6a59f5dc`, `172.31.0.0/16`),
+y no existe `terraform.tfstate` en ninguna de las dos máquinas — el `apply` de la Fase 2 **no se
+corrió**. O sea que el traspaso vuelve a ser gratis y la regla de "aplicar desde una sola máquina"
+sigue sin haberse puesto a prueba.
+
+**Lo primero al retomar en la máquina nueva**, en este orden:
+
+1. `git pull`
+2. `terraform init` (el `.terraform/` no viaja: es caché de binarios por plataforma)
+3. `terraform plan` → tiene que decir `10 to add, 0 to change, 0 to destroy`
+4. Recién ahí `terraform apply`, y **desde esa máquina en adelante, siempre la misma** hasta
+   completar la Fase 3.
+
+Si el `plan` dijera otra cosa que `10 to add`, parar: significa que alguien aplicó desde otro lado
+y hay que reconciliar antes de tocar nada.

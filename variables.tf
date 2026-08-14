@@ -32,3 +32,27 @@ variable "vpc_cidr" {
   description = "Rango CIDR de la VPC. /16 da 65.536 direcciones, de sobra para el lab."
   default     = "10.0.0.0/16"
 }
+
+variable "public_subnet_cidr" {
+  type        = string
+  description = "CIDR de la subnet publica. Tiene que estar contenido en vpc_cidr."
+  default     = "10.0.1.0/24"
+}
+
+variable "private_subnet_cidr" {
+  type        = string
+  description = "CIDR de la subnet privada. Tiene que estar contenido en vpc_cidr y no solaparse con la publica."
+  default     = "10.0.2.0/24"
+}
+
+variable "public_subnet_az" {
+  type        = string
+  description = "Zona de disponibilidad de la subnet publica."
+  default     = "us-east-1a"
+}
+
+variable "private_subnet_az" {
+  type        = string
+  description = "Zona de disponibilidad de la subnet privada. Distinta de la publica para mostrar que una subnet vive en una sola AZ."
+  default     = "us-east-1b"
+}
