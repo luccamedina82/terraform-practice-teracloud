@@ -63,6 +63,7 @@ es la herramienta, no AWS.
 | Key del estado | `tf-workshop/terraform.tfstate` — **no cambiar**: cambiarla equivale a perder el estado |
 | Perfil AWS | `default` |
 | Entorno local | WSL Ubuntu 26.04. Terraform v1.15.8 en `~/.local/bin` (binario, no `apt`) |
+| Cómo invocar WSL | **`wsl -d Ubuntu -e bash -lc '...'`**, siempre con `-d Ubuntu`. En la segunda máquina el distro default es `docker-desktop`, que no trae `bash` (ver bitácora §9) |
 | Repo | `/mnt/c/Users/lucca/desktop/teracloud/terraform-practice-teracloud` — se edita desde Windows, se ejecuta desde WSL |
 
 **Ojo con Windows/WSL**: ya me mordió el CRLF en un lab anterior (shebangs corruptos sin error
@@ -105,6 +106,20 @@ Después de cada hito, actualizar `BITACORA.md` con lo que corresponda:
 Regla práctica: **si algo llevó más de diez minutos de resolver, va a la bitácora**, aunque en
 retrospectiva parezca obvio.
 
+### Primera pasada de documentación — 18-ago-2026, con las Fases 8 y 9 sin ejecutar
+
+`DISENO.md`, este archivo y `BITACORA.md` se llevan a Claude Desktop para generar el documento con
+la skill `documentacion-tecnica` **antes de terminar el workshop**. Las Fases 0 a 7 están cerradas y
+verificadas; las Fases 8 (drift e import) y 9 (cierre y `destroy`) no se ejecutaron.
+
+El documento tiene que **incluir esos capítulos con placeholders visibles**, no omitirlos. La
+instrucción concreta, con el detalle de qué falta en cada uno, está en **`BITACORA.md` §10**, que se
+escribió para eso. Las capturas anotadas como `CAPTURA PENDIENTE` a lo largo de §2 también van como
+huecos con su leyenda.
+
+Al retomar las Fases 8 y 9: actualizar `BITACORA.md` normalmente y **volver a §10** para tachar lo
+que se completó, así la segunda pasada de documentación sabe qué placeholders reemplazar.
+
 ---
 
 ## Estado de avance
@@ -114,13 +129,13 @@ Actualizar al cerrar cada fase.
 | Fase | Estado |
 |---|---|
 | 0 — Bootstrap (perfil, bucket, repo, provider) | **cerrada** — `init` OK · `plan` "no changes" · `sts` OK · bucket creado y endurecido |
-| 1 — Data sources | **cerrada** — `apply` con `0 added` · zone `Z0909248Q51XTVKXPOG` · AMI `ami-07a5b367e8dc8bd92` |
+| 1 — Data sources | **cerrada** — `apply` con `0 added` · zone `Z0909248Q51XTVKXPOG` · AMI `ami-07a5b367e8dc8bd92` **(ya desactualizada: el 18-ago el data source resuelve `ami-02b3d83d84b07786d`. `most_recent = true` se mueve solo — ver bitácora §9)** |
 | 2 — Red | **cerrada** (18-ago-2026) — `apply` OK, 10 recursos managed · verificado por CLI contra la API · VPC `vpc-09b6544aea696e9dd` · SG `sg-0b1c39e081bc25b04` |
 | 3 — Migración a backend S3 | **cerrada** (18-ago-2026) — `init -migrate-state` OK · objeto en S3 cifrado y versionado · 10 managed + 2 data preservados · `plan` = `No changes` |
 | 4 — ECR + push de la imagen | **cerrada** (18-ago-2026) — repo `sf-tf-workshop-lm` · imagen propia sobre `nginx:alpine` · `list-images` devuelve `latest` · scan on push con **0 hallazgos** |
 | 5 — IAM | **cerrada** (18-ago-2026) — rol `role-ec2-tf-workshop-lm` · 2 políticas adjuntas · instance profile `AIPARQ4K5WBKHX6MIHWCV` contiene el rol, verificado por CLI |
 | 6 — EC2 + user_data | **cerrada** (18-ago-2026) — `i-038459aacc0d1e104` · IP `3.234.229.254` · SSM `Online` · `user_data termina OK` en 81 s · HTTP 200 desde internet · digest idéntico al pusheado |
-| 7 — DNS | pendiente |
+| 7 — DNS | **cerrada** (18-ago-2026) — registro A `sf.luccamedina.ownboarding.teratest.net` → `3.234.229.254`, TTL 60 · `INSYNC` en 35 s · `dig` OK contra el NS autoritativo y contra el resolver · `curl` HTTP 200 |
 | 8 — Drift e import | pendiente |
 | 9 — Cierre y destroy | pendiente |
 

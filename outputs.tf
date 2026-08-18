@@ -57,3 +57,8 @@ output "instance_public_ip" {
   value       = aws_instance.game.public_ip
   description = "IP publica de la instancia. La consume el registro A de la Fase 7 y sirve para probar el juego antes de que exista el DNS. Cambia con cada stop/start: no hay Elastic IP."
 }
+
+output "game_url" {
+  value       = "http://${aws_route53_record.game.fqdn}"
+  description = "URL final del juego. Sale del atributo fqdn del registro, que Route53 devuelve sin punto final, y no de una string armada a mano: si el nombre del registro cambiara, esta salida lo sigue. Entregable del workshop."
+}

@@ -37,6 +37,7 @@ Completar con IDs reales al cerrar cada fase.
 | Instancia EC2 (Fase 6) | `ec2-tf-workshop-lm` | `i-038459aacc0d1e104` | `t3.micro` · AMI `ami-02b3d83d84b07786d` · `us-east-1a` · privada `10.0.1.217` · pública `3.234.229.254` · IMDS `http_tokens = required` · instance profile `profile-ec2-tf-workshop-lm` · lanzada `2026-08-18T13:34:27Z` | **Sí, es lo único que factura de verdad.** `t3.micro` on-demand en `us-east-1`, más el EBS. Se apaga con el `destroy` de la Fase 9 |
 | Volumen raíz EBS (Fase 6) | `ebs-root-tf-workshop-lm` | `vol-04d558ac501e8f649` | `gp3` · 8 GiB · `Encrypted: true` con la clave gestionada `aws/ebs` (`b6061ea6-87f4-4eb9-9557-369729891ccb`) | Sí, se cobra por GiB-mes mientras exista. Lo borra el `destroy` junto con la instancia |
 | Contenedor del juego (Fase 6, **creado por el user_data, no por Terraform**) | `sf` | `a7f050feb3d3` | Imagen `sf-tf-workshop-lm:latest`, digest `sha256:9dd22a3c…f44b8e6e9` — **idéntico al pusheado en Fase 4** · `-p 80:80` · `--restart unless-stopped` | No por separado: vive dentro de la EC2 |
+| Registro DNS tipo A (Fase 7) | `sf.luccamedina.ownboarding.teratest.net` | `Z0909248Q51XTVKXPOG_sf.luccamedina.ownboarding.teratest.net_A` (ID compuesto: zona + nombre + tipo, no un ID de AWS) | `A` → `3.234.229.254` · `ttl = 60` · `allow_overwrite` en su default `false` · **sin tags: los registros de Route53 no son taggables** | Prácticamente no: Route53 cobra por millón de consultas y por hosted zone, y la zona ya existía. Un registro A no-alias suma consultas facturables, a diferencia de un Alias, que no las cobra |
 
 ---
 
@@ -1356,6 +1357,126 @@ ver el IAM Role profile-ec2-tf-workshop-lm y IMDSv2 = Required`
 
 ---
 
+### [Fase 7] — Registro A en Route53: del `plan` al juego resolviendo por nombre
+
+**El `plan`, y las tres cosas que confirma antes de aplicar:**
+
+```
+  # aws_route53_record.game will be created
+  + resource "aws_route53_record" "game" {
+      + allow_overwrite = (known after apply)
+      + fqdn            = (known after apply)
+      + id              = (known after apply)
+      + name            = "sf.luccamedina.ownboarding.teratest.net"
+      + records         = [
+          + "3.234.229.254",
+        ]
+      + ttl             = 60
+      + type            = "A"
+      + zone_id         = "Z0909248Q51XTVKXPOG"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+1. **`name` aparece sin punto final.** En el HCL se escribió
+   `"${var.game_name}.${data.aws_route53_zone.main.name}"`, y el atributo `name` del data source
+   **viene con punto final**, así que la interpolación produce literalmente
+   `sf.luccamedina.ownboarding.teratest.net.`. Terraform lo normaliza antes de guardarlo. Que el
+   `plan` lo muestre ya normalizado es la prueba de que no va a haber diff perpetuo entre lo escrito
+   y lo almacenado.
+2. **`records` está resuelto, no `(known after apply)`.** La instancia ya existía y no se toca: el
+   registro se cuelga de la IP que ya estaba en el estado.
+3. **`0 to change, 0 to destroy`** con el data source de la AMI resolviendo `ami-02b3d83d84b07786d`
+   — o sea, la AMI que el data source devuelve hoy es la misma con la que se creó la instancia. Ver
+   la nota de §9 sobre por qué esto es suerte y no diseño.
+
+**El `apply`:**
+
+```
+aws_route53_record.game: Creating...
+aws_route53_record.game: Still creating... [00m10s elapsed]
+aws_route53_record.game: Still creating... [00m21s elapsed]
+aws_route53_record.game: Still creating... [00m31s elapsed]
+aws_route53_record.game: Creation complete after 35s [id=Z0909248Q51XTVKXPOG_sf.luccamedina.ownboarding.teratest.net_A]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+**35 segundos para crear un registro DNS** llama la atención al lado de los recursos de red, que
+son instantáneos. No es lentitud de la API: el provider **espera a que el change set pase a
+`INSYNC`**, es decir, a que Route53 confirme que la modificación se propagó a sus cuatro
+servidores autoritativos. Cuando el `apply` vuelve, el registro no está "creado y ya va a
+propagar": está propagado.
+
+El `id` tampoco es un ID de AWS. Es un identificador compuesto que arma el provider —
+`<zone_id>_<nombre>_<tipo>` — porque la API de Route53 no le da identidad propia a un registro:
+los `ResourceRecordSet` se direccionan justamente por esa terna. Por eso mismo el
+`set_identifier` es obligatorio cuando hay routing policies: sin él, dos registros con el mismo
+nombre y tipo colisionarían en el mismo `id`.
+
+**La verificación, en el orden en que hay que hacerla:**
+
+```bash
+dig +short NS luccamedina.ownboarding.teratest.net
+ns-1521.awsdns-62.org.
+ns-169.awsdns-21.com.
+ns-1930.awsdns-49.co.uk.
+ns-793.awsdns-35.net.
+
+# contra el NS autoritativo, salteando cualquier cache intermedia
+dig +short A sf.luccamedina.ownboarding.teratest.net @ns-1521.awsdns-62.org.
+3.234.229.254
+
+# contra el resolver del sistema
+dig +short A sf.luccamedina.ownboarding.teratest.net
+3.234.229.254
+
+curl -sS -o /dev/null -w "http_code=%{http_code} ip=%{remote_ip} tiempo=%{time_total}s\n" \
+  http://sf.luccamedina.ownboarding.teratest.net
+http_code=200 ip=3.234.229.254 tiempo=0.987992s
+```
+
+**Por qué primero el NS autoritativo y después el resolver.** Si uno consulta el nombre *antes* de
+crearlo, el `NXDOMAIN` que devuelve Route53 **también se cachea**, con la duración del campo
+`minimum` del registro SOA de la zona. Es el *negative caching* de la RFC 2308. El síntoma es
+desconcertante: el registro existe en la consola de Route53, `terraform state show` lo muestra, y
+`dig` sigue diciendo que no existe durante minutos. Preguntándole directo al NS autoritativo se
+esquiva toda cache y se separa "el registro no está creado" de "mi resolver todavía se acuerda de
+que no existía". Acá los dos coincidieron, así que no hubo caching negativo que esperar.
+
+`curl -w` con `%{remote_ip}` cierra el círculo en un solo comando: dice a la vez que el DNS
+resolvió, **a qué IP** resolvió, y que esa IP contestó 200. Un `curl` a secas confirmaría lo
+primero y lo último pero dejaría abierta la pregunta de si estaba pegándole a la instancia
+esperada.
+
+**Outputs finales del proyecto:**
+
+```
+al2023_ami_id = "ami-02b3d83d84b07786d"
+al2023_ami_name = "al2023-ami-2023.12.20260817.0-kernel-6.1-x86_64"
+ecr_repository_url = "104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm"
+game_url = "http://sf.luccamedina.ownboarding.teratest.net"
+instance_id = "i-038459aacc0d1e104"
+instance_public_ip = "3.234.229.254"
+instance_security_group_id = "sg-0b1c39e081bc25b04"
+main_route53_zone_arn = "arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG"
+main_route53_zone_id = "Z0909248Q51XTVKXPOG"
+main_route53_zone_name = "luccamedina.ownboarding.teratest.net"
+private_subnet_id = "subnet-03eb6819b955061da"
+public_subnet_id = "subnet-0033c17b9c7ec238c"
+vpc_id = "vpc-09b6544aea696e9dd"
+```
+
+`CAPTURA PENDIENTE -- el juego cargado en el navegador contra
+http://sf.luccamedina.ownboarding.teratest.net, con la barra de direcciones visible mostrando el
+nombre de dominio y no la IP`
+
+`CAPTURA PENDIENTE -- consola de Route53, hosted zone luccamedina.ownboarding.teratest.net,
+listado de registros: se tiene que ver el A de sf apuntando a 3.234.229.254 con TTL 60`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -1844,6 +1965,11 @@ cambiaron de opinión a mitad de camino.
 | 6 | El host del registry se calcula en HCL con `split()`, no recortando el string en bash | `$${ecr_url%%/*}` dentro del script | La sintaxis de recorte de shell choca con la de interpolación de Terraform y habría que escaparla, quedando ilegible. La lógica en HCL se lee mejor y se ve en el `plan`. Además el error original —hacer `docker login` contra el repositorio en vez del registry— solo se detectó **leyendo el render**, no el fuente | No |
 | 6 | El SSM Agent **no** se instala: solo se habilita y verifica | Instalarlo, como preveía la mitigación de `DISENO.md` §6 | Verificado contra la doc de AWS: AL2023 lo trae preinstalado. El riesgo anotado —"si el paquete no existe, el `install` falla y tampoco instala Docker"— **desaparece porque desaparece el `install`**, que es mejor que mitigarlo separando comandos | Sí — reemplaza la mitigación planificada por una que elimina la causa |
 | 6 | Renderizar la plantilla con `terraform console` antes de aplicar | Confiar en `validate` y descubrirlo en el `apply` | `validate` no evalúa `templatefile()` con valores concretos. El render local encontró dos errores: comentarios del script que rompían la plantilla, y el `docker login` apuntando al repositorio en vez del registry. El segundo **no se ve en el fuente**, solo en el render, y habría fallado dentro de una instancia ya lanzada | No — es método, no diseño |
+| 7 | Registro `A` con `records` + `ttl`, no un bloque `alias` | `alias { name = ..., zone_id = ... }` | Un `alias` de Route53 solo puede apuntar a recursos de AWS que tengan nombre DNS propio —ALB, NLB, CloudFront, S3 website, API Gateway— y a otro registro de la misma zona. **No existe alias hacia una IP.** Como el destino es la IP pública cruda de una EC2, el tipo A con `records` es la única opción. La consecuencia se paga en la factura: las consultas a un A no-alias se cobran, las de un Alias hacia un recurso de AWS no | No — `DISENO.md` §3 ya preveía el registro A |
+| 7 | `ttl = 60` | 300 (el valor típico) o 3600 | La instancia **no tiene Elastic IP**, y `user_data_replace_on_change = true` hace que cualquier cambio del script la reemplace y con ella la IP pública. Con TTL 3600, después de un reemplazo el juego queda inaccesible hasta una hora para quien ya lo hubiera resuelto. 60 s acota ese daño a un minuto. En producción el TTL alto es correcto justamente porque el destino es estable (ALB con Alias) | No — el diseño no fijaba el TTL |
+| 7 | `allow_overwrite` **omitido**, quedando en su default `false` | Ponerlo en `true` "para que el apply nunca falle" | Con `false`, si el registro ya existiera creado a mano en la zona, el `apply` **falla** en vez de pisarlo en silencio. La doc del provider es explícita: *"This configuration is not recommended for most environments"*. Es exactamente la protección que uno quiere en una hosted zone compartida, donde otro registro `sf` podría ser de otra persona. Mismo criterio que en Fase 4 con `encryption_configuration`: no declarar un default salvo que se lo esté cambiando | No |
+| 7 | El output `game_url` se arma con `aws_route53_record.game.fqdn`, no con una string a mano | `"http://${var.game_name}.${var.domain}"` interpolando las mismas variables | La string a mano describe lo que uno *cree* que creó; `fqdn` es lo que **Route53 efectivamente guardó**, leído del estado post-apply. Si el nombre se normalizara distinto de lo esperado, la string a mano seguiría mostrando la URL linda y equivocada. Además `fqdn` viene ya sin punto final, que es lo que un navegador necesita | No |
+| 7 | El registro va sin `tags` | Agregar `tags = { Name = ... }` por coherencia con todos los demás recursos del repo | No es una decisión de estilo: **los `ResourceRecordSet` de Route53 no soportan tags**. Solo son taggables las hosted zones y los health checks. Es el primer recurso del proyecto donde los `default_tags` del provider no aplican, y conviene dejarlo escrito en el HCL para que no parezca un olvido en la revisión | No |
 
 ---
 
@@ -1870,6 +1996,9 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | `set -euxo pipefail` con `-x` en el `user_data` | El trace es lo que permite saber en qué comando exacto murió el script, cuando el síntoma aparece a tres capas de la causa | El trace puede filtrar valores sensibles pasados como argumento a un comando. Acá no pasa —el token de ECR viaja por un pipe, no por `argv`— pero en un script que reciba secretos por parámetro hay que desactivar `-x` en ese tramo |
 | El contenedor corre como `root` dentro de la imagen `nginx:alpine` | Es el default de la imagen oficial y el lab no lo requiere | Usuario sin privilegios en el contenedor, `--read-only` en el filesystem, y `--cap-drop ALL` salvo lo indispensable |
 | Sin health check ni reinicio automático más allá de `--restart unless-stopped` | Alcance del lab | Health check del orquestador que reemplace la tarea cuando deja de responder. `--restart` solo cubre que el proceso muera, no que se cuelgue respondiendo mal |
+| Sin HTTPS: registro A directo a la IP y tráfico por el puerto 80 | El enunciado no pide TLS y no hay ALB donde terminarlo | Certificado de ACM en un ALB, listener 443 y redirect 80→443. Hoy el juego viaja en claro y el navegador lo marca como *Not secure*. Sin ALB no hay dónde poner el certificado: montar TLS en la propia instancia obligaría a renovar con certbot dentro del `user_data` |
+| Registro A no-alias apuntando a una IP, en vez de Alias a un ALB | No hay ALB en el lab, y no existe Alias hacia una IP | El Alias no cobra las consultas y sigue solo al recurso, no a una dirección: la IP del ALB puede cambiar sin tocar el DNS. El registro A acopla el nombre a una IP concreta y hace del TTL un parámetro crítico |
+| Subdominio creado en una hosted zone **compartida** de la empresa, con `allow_overwrite = false` como única protección | Es la zona que provee el onboarding | Zona delegada por proyecto o por entorno, con la política de IAM del rol de despliegue restringida a `route53:ChangeResourceRecordSets` sobre esa zona. Hoy, un error de nombre en `var.game_name` escribiría en la zona de todos, y el permiso de administrador no lo impide |
 
 ---
 
@@ -2120,6 +2249,35 @@ Explicados en criollo, como se los contaría a alguien. Prioridad a lo contraint
 
 ---
 
+### El `id` del estado no siempre es un ID de AWS, y el `apply` no vuelve cuando la API dice "ok"
+
+Dos cosas que se ven juntas en el registro DNS de la Fase 7 y que rompen dos suposiciones cómodas.
+
+**Primera: el `id` de un recurso en el estado lo elige el provider, no AWS.** El del registro es
+`Z0909248Q51XTVKXPOG_sf.luccamedina.ownboarding.teratest.net_A`, o sea zona + nombre + tipo pegados
+con guiones bajos. No existe un "ID de registro" en Route53: la API direcciona los
+`ResourceRecordSet` por esa terna, así que el provider la usa como identidad. Ya había aparecido el
+mismo patrón en la Fase 5 con los `aws_iam_role_policy_attachment`
+(`role-ec2-tf-workshop-lm/arn:aws:iam::aws:policy/...`), y por la misma razón: la relación
+"política adjunta a rol" tampoco tiene identificador propio.
+
+La consecuencia práctica aparece en la Fase 8: para importar uno de estos recursos hay que
+**construir el `id` a mano con el formato exacto que espera el provider**, y ese formato está
+documentado por recurso. No se lo saca de la consola de AWS, porque en la consola no existe.
+
+**Segunda: `Creation complete after 35s` para un registro DNS.** Los recursos de red de la Fase 2
+se crearon en menos de un segundo cada uno. Acá el provider no está esperando a la API —el
+`ChangeResourceRecordSets` responde enseguida— sino a que el *change set* pase de `PENDING` a
+`INSYNC`, que es Route53 confirmando que el cambio llegó a sus cuatro servidores autoritativos.
+
+Es un ejemplo concreto de algo que aplica a todo Terraform: **un `apply` que termina no significa
+"la API aceptó mi pedido", significa "el recurso alcanzó el estado que declaré"**. Los provider
+esperan a la consistencia real cuando el servicio la expone. Y de paso explica por qué la
+verificación con `dig` funcionó de una: cuando el `apply` volvió, la propagación autoritativa ya
+había terminado. Lo único que podía faltar era cache del lado del cliente, no del lado de AWS.
+
+---
+
 ## 7. Preguntas que me hice y su respuesta
 
 Las del tipo "¿por qué no simplemente X?". Son las que después permiten defender las decisiones.
@@ -2179,6 +2337,135 @@ tree (`w/`) por separado, que es lo que ningún otro chequeo distingue:
 ```bash
 git ls-files --eol -- '*.tf'
 ```
+
+### La AMI del data source ya se movió, y el `plan` de la Fase 7 no lo mostró de casualidad
+
+En la Fase 1 el data source resolvió `ami-07a5b367e8dc8bd92`
+(`al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64`). En el `apply` de la Fase 7 resolvió
+`ami-02b3d83d84b07786d` (`al2023-ami-2023.12.20260817.0-kernel-6.1-x86_64`): AWS publicó un build
+nuevo de la misma línea entre una fase y la otra, y `most_recent = true` lo siguió sin que nadie
+tocara una línea de código.
+
+El `plan` dijo `0 to change, 0 to destroy` **solo porque la instancia se creó en la Fase 6, ya con
+el build del 17-ago**. Verificado contra el estado:
+
+```bash
+terraform state show aws_instance.game | grep -E "^\s+(ami|instance_state|public_ip)\s+="
+    ami                                  = "ami-02b3d83d84b07786d"
+    instance_state                       = "running"
+    public_ip                            = "3.234.229.254"
+```
+
+O sea: el valor que quedó registrado en `CLAUDE.md` y en la tabla de trazabilidad como "la AMI de la
+Fase 1" ya no es el que está corriendo. Coincidieron de suerte, no por diseño.
+
+**Lo que esto anticipa de la Fase 8.** El argumento `ami` de `aws_instance` fuerza reemplazo. El día
+que AWS publique el próximo build de la línea `kernel-6.1`, un `terraform plan` sin ningún cambio en
+el repo va a proponer **destruir y recrear la instancia** — y con `user_data_replace_on_change = true`
+ya en juego, eso arrastra IP pública nueva y por lo tanto el registro DNS de la Fase 7 actualizándose
+también. Es "drift" en el sentido inverso al que uno espera: no cambió la infraestructura, cambió
+**lo que el código significa**.
+
+Es el mismo problema que `FROM nginx:alpine` sin digest, ya anotado en la tabla de lab vs.
+producción. La mitigación en producción es idéntica en los dos casos: pinear el valor exacto y
+actualizarlo por decisión, no por calendario de AWS.
+
+### El distro por defecto de WSL en esta máquina no es Ubuntu
+
+En la segunda máquina, `wsl -e bash` falla:
+
+```
+<3>WSL (840 - Relay) ERROR: CreateProcessCommon:798: execvpe(bash) failed: No such file or directory
+```
+
+La causa se ve en el listado:
+
+```bash
+wsl -l -v
+  NAME              STATE     VERSION
+* docker-desktop    Running   2
+  Ubuntu            Running   2
+```
+
+Docker Desktop instala su propio distro y **se quedó con el asterisco de default**. Ese distro es una
+imagen mínima que no trae `bash`, así que cualquier comando lanzado sin especificar distro muere con
+un error que parece de PATH y es de distro equivocado. Todo lo que corra Terraform tiene que ir con
+`wsl -d Ubuntu -e bash -lc '...'`.
+
+---
+
+## 10. Estado al momento de generar la documentación — qué falta y dónde van los placeholders
+
+**Leer esto antes de armar el documento final.** Este repo se congela acá para una primera pasada de
+documentación, con las **Fases 0 a 7 cerradas y verificadas** y las **Fases 8 y 9 sin ejecutar**.
+
+El documento tiene que salir completo en todo lo que sí se hizo, y **dejar secciones vacías con
+placeholders visibles** para lo que falta — no omitirlas ni inventarlas. La idea es que después se
+rellenen sin rehacer el documento.
+
+### Lo que está cerrado y va completo
+
+| Fase | Contenido disponible en esta bitácora |
+|---|---|
+| 0 — Bootstrap | §2 (4 bloques de verificación), §3 (3 problemas reales), §4, §9 |
+| 1 — Data sources | §2 (2 bloques), §4 (3 decisiones), §6 (`most_recent`) |
+| 2 — Red | §2 (`plan` + `apply` verificado contra la API), §3 (`cannot begin with sg-`), §4, §5, §6, §7 |
+| 3 — Backend S3 | §2 (migración completa), §3 (state lock huérfano), §4, §6 (estado, `lineage`/`serial`, el lock como objeto) |
+| 4 — ECR + imagen | §2, §3 (socket de Docker), §4 (6 decisiones), §5 |
+| 5 — IAM | §2, §4, §5 |
+| 6 — EC2 + user_data | §2 (del `.tftpl` al HTTP 200), §4 (6 decisiones), §5, §9 (CRLF) |
+| 7 — DNS | §2, §4 (5 decisiones), §5, §6 (`id` compuesto e `INSYNC`), §9 (drift de la AMI) |
+
+### Lo que falta — dejar placeholder explícito
+
+**Fase 8 — Drift e import. NO EJECUTADA.** El documento tiene que llevar su capítulo con la
+estructura armada y el contenido pendiente. Los tres ejercicios previstos:
+
+1. **Drift provocado a mano.** Cambiar algo por consola (candidato: la descripción de una regla del
+   SG, o un tag de la instancia), y detectarlo con `terraform plan -refresh-only`. Falta: el comando,
+   su output literal, y la explicación de por qué `-refresh-only` no es lo mismo que un `plan` común.
+2. **Import de un recurso creado fuera de Terraform.** Falta: qué recurso, el `id` con el formato
+   exacto que espera el provider, el bloque `import {}` o el `terraform import`, y el `plan` posterior
+   demostrando **cero diff** — que es el único criterio de que el import salió bien.
+3. **Drift "al revés" de la AMI** (ver §9). No hay que provocarlo: ya está latente. Falta: el `plan`
+   del día en que AWS publique el próximo build de `al2023-ami-2023.*-kernel-6.1-x86_64`, mostrando
+   el reemplazo de la instancia sin ningún cambio en el repo.
+
+```
+PLACEHOLDER -- Fase 8, ejercicio 1: output literal de terraform plan -refresh-only con el drift
+detectado, y captura de la consola de AWS mostrando el cambio manual antes de correrlo
+```
+
+```
+PLACEHOLDER -- Fase 8, ejercicio 2: comando de import, id compuesto usado, y el plan posterior
+diciendo "No changes"
+```
+
+```
+PLACEHOLDER -- Fase 8, ejercicio 3: plan que propone reemplazo de la instancia por AMI nueva,
+con los dos IDs de AMI visibles en el diff
+```
+
+**Fase 9 — Cierre y `destroy`. NO EJECUTADA.** Falta: el output del `terraform destroy`, el conteo de
+recursos destruidos, la verificación por CLI de que la cuenta quedó en cero, y el borrado **manual**
+del bucket de estado `tf-state-workshop-lm-104981180500`, que el `destroy` no toca porque se creó
+fuera de Terraform (§1).
+
+```
+PLACEHOLDER -- Fase 9: output de terraform destroy con el conteo final, verificacion por CLI de
+cuenta en cero, y borrado manual del bucket de estado
+```
+
+**Capturas pendientes.** Las anotadas a lo largo de §2 no están tomadas todavía. Van al documento
+como huecos con su leyenda, no eliminadas.
+
+### Advertencia sobre la infraestructura viva
+
+Al momento de esta pasada **la infraestructura está corriendo**: la EC2 `i-038459aacc0d1e104` factura
+mientras exista, y el juego responde en `http://sf.luccamedina.ownboarding.teratest.net`. Las Fases 8
+y 9 dependen de que siga viva. Si se destruye antes de ejecutarlas, hay que reconstruirla con
+`terraform apply` — el código está completo y el estado en S3, así que es reproducible, pero los IDs
+de la tabla de trazabilidad de §1 **cambian todos** salvo los del bucket y el repositorio ECR.
 
 Antes de la mitigación:
 
