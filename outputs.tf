@@ -42,3 +42,8 @@ output "instance_security_group_id" {
   value       = aws_security_group.instance.id
   description = "ID del security group de la instancia. Lo consume aws_instance en la Fase 6 y sirve para verificar las reglas por CLI."
 }
+
+output "ecr_repository_url" {
+  value       = aws_ecr_repository.game.repository_url
+  description = "URL del repositorio ECR, con formato <account>.dkr.ecr.<region>.amazonaws.com/<repo>. Se usa a mano en el docker tag y el docker push de la Fase 4, y la interpola el user_data de la Fase 6."
+}

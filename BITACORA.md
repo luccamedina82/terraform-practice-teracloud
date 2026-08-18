@@ -17,6 +17,19 @@ Completar con IDs reales al cerrar cada fase.
 | Hosted zone Route53 (Fase 1, **leída, no creada** — data source) | `luccamedina.ownboarding.teratest.net.` | `Z0909248Q51XTVKXPOG` (ARN `arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG`) | `private_zone = false`. Preexistente en la cuenta, delegada por NS | No la creó ni la cobra este lab. La zona en sí cuesta ~0,50 USD/mes pero ya existía |
 | AMI Amazon Linux 2023 (Fase 1, **leída, no creada** — data source) | `al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64` | `ami-07a5b367e8dc8bd92` | x86_64 · hvm · ebs · `ena_support` true · `imds_support` v2.0 · `boot_mode` uefi-preferred · owner `137112412989` (alias `amazon`) · **`deprecation_time` 2026-11-01** | No. Es una AMI pública de Amazon |
 | Bucket S3 de estado (Fase 0, **fuera de Terraform**, creado por CLI) | `tf-state-workshop-lm-104981180500` | `arn:aws:s3:::tf-state-workshop-lm-104981180500` | `us-east-1` · versioning `Enabled` · SSE-S3 (`AES256`) con `BucketKeyEnabled` · block public access en los 4 flags · tags `Project`/`ManagedBy`/`Purpose` | Sí, pero despreciable: el bucket en sí no cuesta, solo el almacenamiento del `.tfstate` (unos KB) y sus versiones. Del orden de centavos de USD al mes. **No lo borra `terraform destroy`** — hay que eliminarlo a mano en Fase 9 |
+| VPC (Fase 2) | `vpc-tf-workshop-lm` | `vpc-09b6544aea696e9dd` | `10.0.0.0/16` · `enable_dns_support` y `enable_dns_hostnames` en `true` · `state: available` | No. Una VPC vacía no factura |
+| Subnet pública (Fase 2) | `subnet-public-tf-workshop-lm` | `subnet-0033c17b9c7ec238c` | `10.0.1.0/24` · `us-east-1a` · `map_public_ip_on_launch = true` | No |
+| Subnet privada (Fase 2) | `subnet-private-tf-workshop-lm` | `subnet-03eb6819b955061da` | `10.0.2.0/24` · `us-east-1b` · `map_public_ip_on_launch = false` · sin association: cae en la main route table | No |
+| Internet Gateway (Fase 2) | `igw-tf-workshop-lm` | `igw-03d79e19ed587867e` | Attachment a `vpc-09b6544aea696e9dd` en estado `available` | No. El IGW es gratis — el que cobra por hora es el NAT Gateway, que este lab no usa |
+| Route table pública (Fase 2) | `rt-public-tf-workshop-lm` | `rtb-0e538ac0b28dbd036` | Dos rutas activas: `10.0.0.0/16 → local` (puesta por AWS) y `0.0.0.0/0 → igw-03d79e19ed587867e` (declarada) | No |
+| Main route table de la VPC (Fase 2, **creada por AWS, NO administrada por Terraform**) | sin tag `Name` | `rtb-0e10176026f1fca6c` | Única ruta: `10.0.0.0/16 → local`. Es la que hace privada a la subnet privada, por omisión | No |
+| Route table association (Fase 2) | — | `rtbassoc-04d172e50037a766b` | Une `subnet-0033c17b9c7ec238c` con `rtb-0e538ac0b28dbd036`. Solo la subnet pública | No |
+| Security group (Fase 2) | argumento `name` = `instance-tf-workshop-lm` · tag `Name` = `sg-instance-tf-workshop-lm` | `sg-0b1c39e081bc25b04` | Sin reglas inline. Ver las tres filas siguientes | No |
+| Regla ingress HTTP (Fase 2) | `sgr-ingress-http-tf-workshop-lm` | `sgr-00b6e69b2098978b4` | `tcp` 80–80 desde `0.0.0.0/0` | No |
+| Regla ingress app (Fase 2) | `sgr-ingress-app-tf-workshop-lm` | `sgr-047ba8d2ffd001523` | `tcp` 8080–8080 desde `0.0.0.0/0`. Solo debug del lab | No |
+| Regla egress total (Fase 2) | `sgr-egress-all-tf-workshop-lm` | `sgr-06ba0b4abc932a07f` | `ip_protocol = -1`, `from`/`to` = `-1`, hacia `0.0.0.0/0` | No |
+| Repositorio ECR (Fase 4) | argumento `name` = `sf-tf-workshop-lm` · tag `Name` = `ecr-sf-tf-workshop-lm` | `104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm` | `MUTABLE` · `scanOnPush = true` · `force_delete = true` · cifrado `AES256` (default, no declarado) · creado `2026-08-18T12:46:16Z` | Sí: se cobra el almacenamiento de las imágenes. 33 MiB es despreciable, pero **el repo sí lo borra `terraform destroy`** gracias a `force_delete` |
+| Imagen del juego (Fase 4, **construida y pusheada a mano**) | `sf-tf-workshop-lm:latest` | `sha256:9dd22a3cef18c5c93eb17d79d4a008d748ea32396f96625d1729421f44b8e6e9` | 34.952.071 B (33 MiB comprimido, 112 MB descomprimido) · `linux/amd64` · manifest `v2` simple · base `nginx:alpine` (nginx 1.31.3) · scan on push `COMPLETE` con **0 hallazgos** | Sí, incluido en el costo del repo |
 
 ---
 
@@ -454,6 +467,548 @@ subnets con su AZ distinta (us-east-1a / us-east-1b)`
 
 ---
 
+### [Fase 2] — `apply` de la red: 10 recursos creados y verificados contra la API
+
+El `apply` lo corrió Lucca en una terminal real, desde WSL (pide el `yes` por TTY; ver
+troubleshooting §3, primer bloque). **La salida literal del `apply` no quedó capturada** — lo que
+sigue es la verificación posterior, corrida contra el estado y contra la API de AWS, que es la que
+tiene valor probatorio de todas formas: el `apply` dice lo que Terraform *cree* que hizo, y esto
+dice lo que AWS *tiene*.
+
+```bash
+terraform output -json
+```
+
+```json
+{
+  "al2023_ami_id":              { "value": "ami-02b3d83d84b07786d" },
+  "al2023_ami_name":            { "value": "al2023-ami-2023.12.20260817.0-kernel-6.1-x86_64" },
+  "instance_security_group_id": { "value": "sg-0b1c39e081bc25b04" },
+  "main_route53_zone_arn":      { "value": "arn:aws:route53:::hostedzone/Z0909248Q51XTVKXPOG" },
+  "main_route53_zone_id":       { "value": "Z0909248Q51XTVKXPOG" },
+  "main_route53_zone_name":     { "value": "luccamedina.ownboarding.teratest.net" },
+  "private_subnet_id":          { "value": "subnet-03eb6819b955061da" },
+  "public_subnet_id":           { "value": "subnet-0033c17b9c7ec238c" },
+  "vpc_id":                     { "value": "vpc-09b6544aea696e9dd" }
+}
+```
+
+**Lo primero que salta no es un recurso de red: cambió la AMI.**
+
+| | Fase 1 (14-ago-2026) | Fase 2 (18-ago-2026) |
+|---|---|---|
+| `al2023_ami_id` | `ami-07a5b367e8dc8bd92` | `ami-02b3d83d84b07786d` |
+| `al2023_ami_name` | `al2023-ami-2023.12.20260803.3-kernel-6.1-x86_64` | `al2023-ami-2023.12.20260817.0-kernel-6.1-x86_64` |
+
+Cuatro días, cero líneas de código tocadas, ID distinto. Es exactamente el segundo efecto de
+`most_recent = true` anticipado en §6 —"un `plan` corrido semanas después puede proponer destruir y
+recrear la instancia sin que haya cambiado una línea de código"— y ocurrió antes de lo previsto y
+solo. Hoy es inocuo porque `aws_instance` todavía no existe; **a partir de la Fase 6 este mismo
+cambio deja de ser una línea en `Changes to Outputs` y pasa a ser un `# forces replacement` sobre la
+EC2**, porque el argumento `ami` no se puede modificar en caliente. Anotado como el dato a mirar
+primero si un `plan` de la Fase 8 propone reemplazos que nadie pidió.
+
+Verificación contra la API (no contra el estado):
+
+```bash
+VPC=$(terraform output -raw vpc_id)
+SG=$(terraform output -raw instance_security_group_id)
+
+aws ec2 describe-vpc-attribute --vpc-id "$VPC" --attribute enableDnsHostnames --query 'EnableDnsHostnames.Value'
+aws ec2 describe-vpc-attribute --vpc-id "$VPC" --attribute enableDnsSupport   --query 'EnableDnsSupport.Value'
+aws ec2 describe-subnets            --filters "Name=vpc-id,Values=$VPC" --output table
+aws ec2 describe-internet-gateways  --filters "Name=attachment.vpc-id,Values=$VPC" --output table
+aws ec2 describe-route-tables       --filters "Name=vpc-id,Values=$VPC" --output json
+aws ec2 describe-security-group-rules --filters "Name=group-id,Values=$SG" --output table
+```
+
+```
+=== DNS attrs ===
+true
+true
+
+=== SUBNETS ===
++------------+--------------+----------------------------+---------------------------------+--------+
+|     az     |    cidr      |            id              |              name               | pubIP  |
++------------+--------------+----------------------------+---------------------------------+--------+
+|  us-east-1a|  10.0.1.0/24 |  subnet-0033c17b9c7ec238c  |  subnet-public-tf-workshop-lm   |  True  |
+|  us-east-1b|  10.0.2.0/24 |  subnet-03eb6819b955061da  |  subnet-private-tf-workshop-lm  |  False |
++------------+--------------+----------------------------+---------------------------------+--------+
+
+=== IGW ===
++------------------------+-------------+
+|           id           |    state    |
++------------------------+-------------+
+|  igw-03d79e19ed587867e |  available  |
++------------------------+-------------+
+
+=== ROUTE TABLES ===
++------+----------------------------+-------------------------+----------------------------+
+| main |           name             |           rt            |          subnet            |
++------+----------------------------+-------------------------+----------------------------+
+|False |  rt-public-tf-workshop-lm  |  rtb-0e538ac0b28dbd036  |  subnet-0033c17b9c7ec238c  |
+|  True|  None                      |  rtb-0e10176026f1fca6c  |  None                      |
++------+----------------------------+-------------------------+----------------------------+
+
+[
+    {
+        "rt": "rtb-0e538ac0b28dbd036",
+        "routes": [
+            { "dest": "10.0.0.0/16", "gw": "local",                  "state": "active" },
+            { "dest": "0.0.0.0/0",   "gw": "igw-03d79e19ed587867e",  "state": "active" }
+        ]
+    },
+    {
+        "rt": "rtb-0e10176026f1fca6c",
+        "routes": [
+            { "dest": "10.0.0.0/16", "gw": "local",                  "state": "active" }
+        ]
+    }
+]
+
+=== SG RULES ===
++-----------+--------------------------------------------------------------------+---------+-------+------------------------+--------+--------+
+|   cidr    |                               desc                                 | egress  | from  |          id            | proto  |  to    |
++-----------+--------------------------------------------------------------------+---------+-------+------------------------+--------+--------+
+|  0.0.0.0/0|  HTTP publico hacia el juego                                       |  False  |  80   |  sgr-00b6e69b2098978b4 |  tcp   |  80    |
+|  0.0.0.0/0|  Puerto de la aplicacion, abierto solo para debug del lab          |  False  |  8080 |  sgr-047ba8d2ffd001523 |  tcp   |  8080  |
+|  0.0.0.0/0|  Salida total: docker pull desde ECR y yum update en el user_data  |  True   |  -1   |  sgr-06ba0b4abc932a07f |  -1    |  -1    |
++-----------+--------------------------------------------------------------------+---------+-------+------------------------+--------+--------+
+```
+
+**Las tres cosas que esta salida confirma y que no se pueden ver en el `plan`:**
+
+1. **La main route table existe, tiene ID propio (`rtb-0e10176026f1fca6c`) y Terraform no la
+   administra.** Aparece con `main: True`, sin tag `Name` y sin subnet asociada, con la única ruta
+   `local`. Es la prueba de campo de lo escrito en §6: la subnet privada no tiene ningún recurso
+   que la haga privada — cae acá por descarte y acá no hay `0.0.0.0/0`. En el `terraform state list`
+   no figura, porque no es suya. **Ojo en la Fase 8**: esta tabla es un recurso real de la VPC que
+   el código no conoce, o sea el candidato natural para el ejercicio de `import`.
+2. **La ruta `10.0.0.0/16 → local` está en las dos tablas** y nunca se escribió en el HCL. AWS la
+   pone sola y no se puede borrar. Confirmado que **no es drift** antes de llegar a la Fase 8, que
+   es cuando se va a comparar el `plan` contra la consola.
+3. **Las reglas de SG son objetos con ID propio `sgr-...`**, listables por una API dedicada
+   (`describe-security-group-rules`, que no existía en la era de las reglas inline). Cada una tiene
+   su `Description` propia, cosa que un bloque `ingress {}` inline no permite por regla. Es lo que
+   hace que los diffs sean quirúrgicos.
+
+Estado después del `apply`:
+
+```bash
+terraform state list
+```
+
+```
+data.aws_ami.al2023
+data.aws_route53_zone.main
+aws_internet_gateway.main
+aws_route_table.public
+aws_route_table_association.public
+aws_security_group.instance
+aws_subnet.private
+aws_subnet.public
+aws_vpc.main
+aws_vpc_security_group_egress_rule.all
+aws_vpc_security_group_ingress_rule.app
+aws_vpc_security_group_ingress_rule.http
+```
+
+```
+serial   11
+lineage  bb05f068-952b-8a96-bc69-731f58f919cb
+managed  10
+data     2
+```
+
+**Dos lecturas del estado, las dos importantes para la Fase 3:**
+
+- **`serial: 11`, no `1`.** El serial no cuenta `apply`s, cuenta **escrituras del archivo de
+  estado**: Terraform lo persiste a medida que cada recurso termina, no una vez al final. Por eso
+  un `apply` de 10 recursos deja el serial en dos dígitos. Es también la razón por la que un
+  `apply` interrumpido a la mitad no pierde lo ya creado.
+- **`lineage: bb05f068-952b-8a96-bc69-731f58f919cb`**, distinto del `28d49728-...` que tenía el
+  estado de la Fase 1. No es un problema: aquel `terraform.tfstate` se había borrado entre sesiones
+  y sin recursos managed que perder, así que el `apply` de hoy arrancó un linaje nuevo.
+
+  > **Corrección posterior (Fase 3).** Acá se anotó que este UUID era el invariante a verificar
+  > después del `init -migrate-state`, y que un lineage distinto significaría estado nuevo y
+  > recursos huérfanos. **Es falso**, y se comprobó en vivo al migrar: el lineage cambió y no se
+  > perdió nada. El desarrollo completo está en el bloque de Fase 3 de esta misma sección.
+
+`CAPTURA PENDIENTE -- consola de VPC, us-east-1, Route Tables filtrado por VPC vpc-09b6544aea696e9dd:
+se tienen que ver las DOS tablas, la rt-public-tf-workshop-lm con la ruta 0.0.0.0/0 al IGW y su
+subnet asociada, y la main sin nombre con solo la ruta local y "Main: Yes"`
+
+`CAPTURA PENDIENTE -- consola de EC2, Security Groups, sg-0b1c39e081bc25b04, pestaña Inbound rules:
+se tienen que ver las dos reglas con su Description propia y su Rule ID sgr-...`
+
+---
+
+### [Fase 3] — Migración del backend local a S3
+
+Diff de la fase: **un solo bloque** de `versions.tf`. Nada más.
+
+```hcl
+# antes
+backend "local" {
+  path = "terraform.tfstate"
+}
+
+# despues
+backend "s3" {
+  bucket       = "tf-state-workshop-lm-104981180500"
+  key          = "tf-workshop/terraform.tfstate"
+  region       = "us-east-1"
+  encrypt      = true
+  use_lockfile = true
+}
+```
+
+```bash
+terraform fmt && terraform validate   # fmt: sin salida. validate: Success!
+terraform init -migrate-state         # corrido en terminal real: pide "yes" por TTY
+```
+
+```
+Initializing the backend...
+Terraform detected that the backend type changed from "local" to "s3".
+Do you want to copy existing state to the new backend?
+  Pre-existing state was found while migrating the previous "local" backend to the
+  newly configured "s3" backend. No existing state was found in the newly
+  configured "s3" backend. Do you want to copy this state to the new "s3"
+  backend? Enter "yes" to copy and "no" to start with an empty state.
+
+  Enter a value: yes
+
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Reusing previous version of hashicorp/aws from the dependency lock file
+- Using previously-installed hashicorp/aws v6.60.0
+
+Terraform has been successfully initialized!
+```
+
+**Detalle que confirma algo de la Fase 0:** el `init` detectó el cambio de backend porque el `hash`
+guardado en `.terraform/terraform.tfstate` dejó de coincidir. Pasó de `73024536` (local) a
+`2869535846` (s3). Ese archivo, que en la Fase 0 parecía un dato de color, es exactamente el
+mecanismo que dispara la pregunta de migración.
+
+**`validate` no valida el backend.** Dio `Success!` con el bloque `s3` recién escrito y sin haber
+tocado AWS: no chequea que el bucket exista, ni que haya permisos, ni que la key sea alcanzable.
+El único comando que prueba el backend de verdad es `init`.
+
+#### Verificación del criterio de salida
+
+```bash
+B=tf-state-workshop-lm-104981180500
+K=tf-workshop/terraform.tfstate
+
+aws s3api list-object-versions --bucket "$B" --output json     # con Key en la proyeccion
+aws s3api head-object --bucket "$B" --key "$K" --query '{enc:ServerSideEncryption,size:ContentLength}'
+aws s3api get-object  --bucket "$B" --key "$K" /tmp/s3state.json   # leer el estado DEL BUCKET
+terraform plan
+```
+
+```json
+{ "enc": "AES256", "size": 22958, "vid": "tz0UMyt0NcjgjjCejyuFF_lRciRR9K0x" }
+```
+
+```
+# estado bajado del bucket, no del disco
+lineage 8976e38b-cd80-4322-ef04-a4c95169a08f
+serial  1
+managed 10
+data    2
+```
+
+```
+aws_vpc.main: Refreshing state... [id=vpc-09b6544aea696e9dd]
+aws_subnet.public: Refreshing state... [id=subnet-0033c17b9c7ec238c]
+aws_security_group.instance: Refreshing state... [id=sg-0b1c39e081bc25b04]
+aws_route_table_association.public: Refreshing state... [id=rtbassoc-04d172e50037a766b]
+...
+No changes. Your infrastructure matches the configuration.
+Releasing state lock. This may take a few moments...
+```
+
+| Chequeo | Resultado |
+|---|---|
+| Objeto presente en S3 | `tf-workshop/terraform.tfstate`, 22.958 bytes |
+| Cifrado en reposo | `ServerSideEncryption: AES256` — el `encrypt = true` llegó al `PutObject` |
+| Versioning activo | Registró la escritura con `VersionId` propio |
+| Backend registrado | `.terraform/terraform.tfstate` → `type: s3`, `hash: 2869535846` |
+| Respaldo local | `terraform.tfstate` sigue en disco (`bb05f068`, serial 11, 12 recursos) e ignorado por `.gitignore:7` |
+| Recursos preservados | 10 managed + 2 data, todos refrescan por su ID real |
+| `plan` | `No changes` |
+
+#### El error que cometí en la predicción, y por qué importa
+
+**Lo que estaba anotado antes de migrar:** "si tras migrar el lineage no es `bb05f068-...`, no se
+migró el estado, se creó uno nuevo y los 10 recursos quedaron huérfanos".
+
+**Lo que pasó:** el lineage cambió (`bb05f068-...` → `8976e38b-...`), el serial se reseteó de 11 a
+1, y **no se perdió absolutamente nada** — los 10 recursos están en el objeto de S3 y el `plan` da
+`No changes`.
+
+**Causa, verificada contra la fuente y no contra la intuición** — `internal/states/remote/state.go`
+del repo de HashiCorp, método `PersistState`:
+
+```go
+if s.lineage == "" { // indicates that no state snapshot is present yet
+    lineage, err := uuid.GenerateUUID()
+    if err != nil {
+        return fmt.Errorf("failed to generate initial lineage: %v", err)
+    }
+    s.lineage = lineage
+    s.serial++
+```
+
+El backend S3 estaba vacío, así que el gestor de estado remoto **acuña un lineage nuevo y arranca
+el serial en 1**. Migrar hacia un destino vacío siempre hace esto. No es un síntoma de nada.
+
+**La lección, que es la que vale**: el lineage identifica la continuidad de un estado **dentro de
+un mismo backend** — es lo que detecta que alguien reemplazó tu archivo de estado por otro
+distinto entre dos escrituras al mismo lugar. A través de una migración a un destino vacío no
+tiene sentido compararlo. El invariante correcto para juzgar una migración es otro, y son tres
+cosas: **el conjunto de recursos, sus IDs reales, y un `plan` que diga `No changes`**. Eso es lo
+que prueba que el estado sigue apuntando a la misma infraestructura.
+
+Generalizable: un invariante elegido por intuición puede ser a la vez plausible y equivocado. Antes
+de usar un campo como criterio de aceptación, hay que saber **quién lo escribe y cuándo**.
+
+#### El lock, que se puede ver y leer
+
+Listando versiones **con la Key en la proyección** aparecen dos objetos distintos, no uno:
+
+```
+tf-workshop/terraform.tfstate           22958  12:25:27   (1 version, el estado)
+tf-workshop/terraform.tfstate.tflock      254  12:25:12   (el init)
+tf-workshop/terraform.tfstate.tflock      244  12:26:15   (el plan)
+
+DeleteMarkers:
+tf-workshop/terraform.tfstate.tflock           12:25:27   (unlock del init)
+tf-workshop/terraform.tfstate.tflock           12:26:25   (unlock del plan)
+```
+
+Dos ciclos lock/unlock completos con su delete marker cada uno. Y el contenido del lock es legible:
+
+```json
+{"ID":"ea1f3de2-be0e-273c-e2a1-0ab301156572","Operation":"OperationTypePlan","Info":"",
+ "Who":"lucca@LUQUITA","Version":"1.15.8","Created":"2026-08-18T12:26:13.211078748Z",
+ "Path":"tf-state-workshop-lm-104981180500/tf-workshop/terraform.tfstate"}
+```
+
+Ahí está, en concreto, por qué `use_lockfile` no necesita DynamoDB: **el lock es un objeto de S3**,
+creado con escrituras condicionales y borrado al terminar. El campo `Who` es literalmente lo que
+aparecería en el `Error acquiring the state lock` de un segundo `apply` simultáneo, y `Operation`
+distingue si el que tiene el lock está planificando o aplicando.
+
+**Trampa de lectura anotada**: `--prefix tf-workshop/terraform.tfstate` matchea **también** el
+`.tflock`, porque es prefijo, no nombre exacto. En la primera lectura interpreté los objetos de 254
+y 244 bytes como versiones viejas del estado. Si se listan versiones de un estado, hay que proyectar
+`Key` — si no, se están mirando dos objetos distintos creyendo que son uno.
+
+`CAPTURA PENDIENTE -- consola de S3, bucket tf-state-workshop-lm-104981180500, objeto
+tf-workshop/terraform.tfstate con "Show versions" activado: se tiene que ver la version del estado
+y, si se captura durante un apply, el objeto hermano terraform.tfstate.tflock`
+
+---
+
+### [Fase 4] — ECR creado por Terraform, imagen construida y pusheada a mano
+
+Config agregada: `ecr.tf` (un recurso), la variable `game_name` y el output `ecr_repository_url`.
+
+```bash
+terraform fmt && terraform validate && terraform apply
+```
+
+```
+  # aws_ecr_repository.game will be created
+  + resource "aws_ecr_repository" "game" {
+      + force_delete         = true
+      + image_tag_mutability = "MUTABLE"
+      + name                 = "sf-tf-workshop-lm"
+      + repository_url       = (known after apply)
+      + image_scanning_configuration {
+          + scan_on_push = true
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+aws_ecr_repository.game: Creating...
+aws_ecr_repository.game: Creation complete after 1s [id=sf-tf-workshop-lm]
+Releasing state lock. This may take a few moments...
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+ecr_repository_url = "104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm"
+```
+
+**Detalle del `id`**: es `sf-tf-workshop-lm`, el nombre — no un ARN ni un identificador opaco.
+ECR usa el nombre como identidad, que es la razón por la que ese nombre tiene reglas de formato
+(solo minúsculas, `[a-z0-9._/-]`) y por la que cambiarlo fuerza reemplazo. Tercera aparición de la
+distinción `name` (identificador con reglas del servicio) vs. tag `Name` (texto libre): ya había
+mordido en el SG de la Fase 2.
+
+#### Elección de la imagen: verificada abriendo las capas, no leyendo descripciones
+
+Ninguno de los candidatos de Docker Hub tenía descripción útil. Se resolvió bajando el manifest y
+destarando las capas de cada uno:
+
+| Candidata | Veredicto |
+|---|---|
+| `tertiaryinfotech/street-fighter-game` | **Solo arm64** — no bootea en `t3.micro` |
+| `rmelamud/street-fighter` | 418 MB de Node, `npm start` en 8080 |
+| `alinablankselina/street-fighter` | 398 MB de Node, sin `ExposedPorts` declarado |
+| `appachey/street-fighter` | `php -S 0.0.0.0:8082`, 132 MB |
+| `simeontchakarov/streetfighter2` | ASP.NET 10 en 8080, 121 MB |
+| `mattrayner/doom` | **No existe** — `object not found` |
+| `darmos/streetfighter` | nginx en **80**, 54 MiB, amd64. La única servible tal cual |
+
+Contenido real de `darmos/streetfighter`, leído de la capa de aplicación:
+
+```
+usr/share/nginx/html/index.html
+usr/share/nginx/html/js/{ken.js, audio.js, jquery.min.js, soundmanager2-jsmin.js}
+usr/share/nginx/html/css/style.css
+usr/share/nginx/html/images/{ken.png, guile.png, ken-shoryuken.png, ...}
+usr/share/nginx/html/audio/{hado.wav, shoryu.wav, tatsumaki-senpuu-kyaku.wav, music.mp3}
+```
+
+Es el demo **Street Fighter II en CSS puro** de `jkneb` (tutorial del blog de David Walsh). Estático
+y autocontenido: jQuery viene adentro, no hay CDN externo, así que arranca sin salida a internet.
+Su base es Debian stretch + nginx 1.13, **las dos EOL**, y se iba a exponer en `0.0.0.0/0:80` — de
+ahí la decisión de construirla nosotros desde el fuente original (`jkneb/street-fighter-css`, 48
+stars) sobre `nginx:alpine`.
+
+#### Build local y smoke test antes de pushear
+
+```dockerfile
+FROM nginx:alpine
+COPY . /usr/share/nginx/html
+```
+
+```
+.dockerignore
+-------------
+.git
+.gitignore
+Dockerfile
+.dockerignore
+scss
+readme.md
+```
+
+```bash
+docker build --provenance=false -t sf:local /tmp/sf
+docker run -d --rm -p 8080:80 --name sftest sf:local
+curl -sI http://localhost:8080/
+for p in index.html css/style.css js/ken.js images/ken.png audio/music.mp3 .git/config; do
+  curl -s -o /dev/null -w "$p %{http_code} %{size_download}B\n" http://localhost:8080/$p
+done
+```
+
+```
+HTTP/1.1 200 OK
+Server: nginx/1.31.3
+
+index.html      200 1389B
+css/style.css   200 15003B
+js/ken.js       200 8377B
+images/ken.png  200 120943B
+audio/music.mp3 200 2288977B
+.git/config     404          <-- el .dockerignore hizo su trabajo
+```
+
+**Por qué el `.dockerignore` no es cosmético.** El primer `Dockerfile` era
+`COPY . /usr/share/nginx/html` sobre un directorio recién clonado, o sea que **nginx habría servido
+el `.git/` por HTTP**: 12,5 MB de packfiles desde los que se reconstruye el repositorio y su
+historial completo. Acá el fuente es público y no cambia nada, pero es el patrón exacto con el que
+se filtran credenciales en `.git/config` o en commits viejos. El `404` de arriba es la verificación
+de que quedó afuera. Y no alcanza con sacarlo del `COPY`: `.dockerignore` actúa **antes**, al armar
+el contexto, así que los archivos ni siquiera llegan al daemon.
+
+#### Login y push
+
+```bash
+REG=104981180500.dkr.ecr.us-east-1.amazonaws.com
+ECR=$REG/sf-tf-workshop-lm
+
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REG"
+docker build --provenance=false -t "$ECR:latest" /tmp/sf
+docker push "$ECR:latest"
+```
+
+```
+Login Succeeded
+
+1223f016b4e4: Pushed
+46f977ee452f: Pushed
+390dc935348d: Pushed
+d0008c891db4: Pushed
+62bec68d7c31: Pushed
+3cd534fe98c6: Pushed
+55afa1ecc21d: Pushed
+a06fd7c7adf7: Pushed
+46519e7231d2: Pushed
+latest: digest: sha256:9dd22a3cef18c5c93eb17d79d4a008d748ea32396f96625d1729421f44b8e6e9 size: 2071
+```
+
+**Por qué el login se escribe exactamente así.** `get-login-password` devuelve un token temporal
+(12 h) y el usuario es siempre literalmente `AWS` — no es el nombre del usuario IAM. La parte que
+importa es `--password-stdin`: pasarlo como `--password <token>` lo deja en el historial de la
+shell y visible en la tabla de procesos para cualquier usuario de la máquina. Con ese token se
+escribe en el registry.
+
+#### Criterio de salida de la fase
+
+```bash
+aws ecr list-images --repository-name sf-tf-workshop-lm --region us-east-1
+aws ecr describe-images --repository-name sf-tf-workshop-lm --region us-east-1
+aws ecr describe-image-scan-findings --repository-name sf-tf-workshop-lm --image-id imageTag=latest --region us-east-1
+aws ecr describe-repositories --repository-names sf-tf-workshop-lm --region us-east-1
+```
+
+```json
+{ "imageIds": [ { "imageDigest": "sha256:9dd22a3c...f44b8e6e9", "imageTag": "latest" } ] }
+
+[ { "tags": ["latest"], "mb": 34952071, "pushed": "2026-08-18T12:51:45Z",
+    "manifest": "application/vnd.docker.distribution.manifest.v2+json" } ]
+
+{ "status": { "status": "COMPLETE", "description": "The scan was completed successfully." },
+  "counts": {} }
+
+[ { "url": "104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm",
+    "mutability": "MUTABLE", "scan": true, "enc": "AES256",
+    "created": "2026-08-18T12:46:16Z" } ]
+```
+
+**Las tres lecturas que valen:**
+
+1. **`findingSeverityCounts: {}` — cero CVEs.** Es la comprobación objetiva, y no la intuición, de
+   que descartar la imagen de 2018 valió la pena. El escaneo de ECR mira los paquetes del sistema
+   operativo de la imagen; sobre `nginx:alpine` actual no encontró nada.
+2. **`imageManifestMediaType` es `manifest.v2+json`, no una lista.** El `--provenance=false`
+   funcionó: sin él, buildx habría subido también un *attestation manifest*, y en la consola de ECR
+   aparecería una segunda entrada con plataforma `unknown/unknown` al lado de la imagen real,
+   escaneada por separado. Es de esas cosas que después no se saben explicar.
+3. **`enc: AES256` sin haberlo declarado.** Confirma que omitir `encryption_configuration` fue
+   correcto: el default ya cifra con clave gestionada por AWS.
+
+**Nota de tamaño, con la unidad correcta**: 34.952.071 B = **33 MiB comprimidos** en ECR, contra los
+112 MB que reporta `docker images` en local. Son dos medidas distintas — la de ECR es lo que viaja
+por la red, la local es lo que ocupa el disco descomprimido. De esos 112 MB, solo **9,7 MB** son los
+assets del juego; el resto es la base `nginx:alpine`. Contra los 54 MiB comprimidos de
+`darmos/streetfighter`, la imagen propia es a la vez más chica y más nueva.
+
+`CAPTURA PENDIENTE -- consola de ECR, repositorio sf-tf-workshop-lm: se tiene que ver la unica
+imagen con tag latest, su digest, y la columna de vulnerabilidades del scan on push en cero`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -707,6 +1262,97 @@ Un bloque por problema **realmente ocurrido**. No hipotéticos.
 
 ---
 
+### `docker push` falla con `permission denied` sobre el socket, con el usuario ya en el grupo `docker`
+
+- **Fase**: 4
+
+- **Síntoma**: el `docker login` a ECR funcionó, y los dos comandos siguientes fallaron:
+
+  ```
+  Login Succeeded
+
+  ERROR: permission denied while trying to connect to the Docker daemon socket at
+  unix:///var/run/docker.sock: Head "http://%2Fvar%2Frun%2Fdocker.sock/_ping":
+  dial unix /var/run/docker.sock: connect: permission denied
+
+  permission denied while trying to connect to the Docker daemon socket at
+  unix:///var/run/docker.sock: Post "http://%2Fvar%2Frun%2Fdocker.sock/v1.51/images/
+  104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm/push?tag=latest":
+  dial unix /var/run/docker.sock: connect: permission denied
+  ```
+
+- **Hipótesis descartada de entrada, y por el propio output**: *problema de permisos de AWS / del
+  usuario IAM sobre ECR*. Es la lectura natural cuando se acaba de crear el repositorio y la
+  palabra "permission denied" aparece justo después de un comando de `aws`. Pero **`Login
+  Succeeded` sale primero**: `docker login` habla con el registry por HTTPS y escribe el token en
+  `~/.docker/config.json` — **no necesita el daemon**. O sea que la autenticación contra ECR había
+  funcionado. El `permission denied` lo emite Docker, sobre un **socket Unix local**, y no tiene
+  nada que ver con IAM.
+
+- **Hipótesis descartadas**:
+  - *El usuario no está en el grupo `docker`*: descartada, `getent group docker` devuelve
+    `docker:x:1001:lucca`.
+  - *Docker Desktop no está corriendo o la integración WSL está apagada*: descartada, el socket
+    existe y el daemon responde.
+  - *El socket tiene permisos mal*: descartada, `srw-rw---- 1 root docker` es exactamente lo
+    normal — lectura y escritura para el dueño (`root`) y para el grupo (`docker`).
+
+- **Causa raíz**: **la lista de grupos de un proceso se fija al iniciar la sesión y no se
+  reevalúa.** La terminal estaba abierta desde antes de que se activara la integración WSL de
+  Docker Desktop; el grupo `docker` se creó y se agregó al usuario **después**. El shell siguió
+  corriendo con la lista de grupos vieja, sin `docker`, así que el kernel le negó el acceso al
+  socket. La marca de tiempo lo confirma: el socket es de las `12:42`, posterior a la apertura de
+  la shell.
+
+  Comparación de la misma shell contra una recién abierta:
+
+  ```bash
+  # en una shell NUEVA
+  id
+  ls -l /var/run/docker.sock
+  docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+  ```
+
+  ```
+  uid=1000(lucca) gid=1000(lucca) groups=1000(lucca),4(adm),24(cdrom),27(sudo),
+      30(dip),46(plugdev),100(users),1001(docker)
+
+  srw-rw---- 1 root docker 0 Aug 18 12:42 /var/run/docker.sock
+
+  client=28.3.2 server=28.3.2
+  ```
+
+  En la shell nueva aparece `1001(docker)` en `groups` y todo funciona. En la vieja, no.
+
+- **Fix aplicado**: abrir una terminal nueva. El `build` y el `push` corrieron sin tocar nada más
+  y sin `sudo`. Alternativas sin cerrar la sesión: `newgrp docker` o `exec su -l "$USER"`, que
+  fuerzan una reevaluación de los grupos.
+
+  **Descartado a propósito**: `sudo docker ...`. Habría funcionado y es lo primero que aparece al
+  buscar el error, pero deja los archivos del build y `~/.docker/config.json` con dueño `root`, y
+  el `docker login` ya hecho como usuario normal no aplicaría — o sea que arrastra un segundo
+  problema para tapar el primero. También `chmod 666 /var/run/docker.sock`, que es peor: da
+  control del daemon a cualquier usuario de la máquina, y el daemon corre como root.
+
+- **Lección**: **es el mismo mecanismo que el `~/.local/bin` que no estaba en el `PATH` en la Fase
+  0.** En los dos casos la configuración era correcta en el disco y el problema era que el proceso
+  en ejecución tenía una foto vieja del entorno, tomada al arrancar. Regla práctica: cuando algo
+  "está bien configurado pero no anda", comparar el proceso actual contra **una shell recién
+  abierta** antes de tocar la configuración. Si en la nueva funciona, el problema es el estado
+  heredado, no la config.
+
+  Segunda lección, sobre lectura de errores: **"permission denied" no dice de quién.** Acá había
+  dos sistemas de permisos en juego —IAM y el filesystem de Linux— y el mensaje mencionaba
+  `unix:///var/run/docker.sock`, que ya decía cuál de los dos. El `Login Succeeded` inmediatamente
+  anterior descartaba el otro. La pista estaba entera en el output, como la barra invertida de
+  `.terraform\providers` en el troubleshooting de la Fase 1.
+
+- **Tiempo aproximado**: ~5 min. Va a la bitácora, por debajo de la regla de los diez minutos,
+  porque el patrón "el proceso tiene una foto vieja del entorno" ya apareció dos veces en este
+  workshop y va a volver a aparecer.
+
+---
+
 ## 4. Decisiones tomadas durante la ejecución
 
 Las que no estaban en `DISENO.md` o que lo contradicen. Incluir explícitamente las que
@@ -732,6 +1378,16 @@ cambiaron de opinión a mitad de camino.
 | 2 | SG con `name` fijo en vez de `name_prefix` | `name_prefix` + `create_before_destroy` | Cambiar el `name` fuerza reemplazo del SG, y AWS no deja borrar un SG en uso: con la EC2 adjunta (Fase 6) el reemplazo se traba. `name_prefix` + `create_before_destroy` es el patrón de producción. Acá el nombre sale de variables que no se van a tocar, así que el riesgo no se materializa | No |
 | 2 | Outputs solo para VPC, las dos subnets y el SG | Exportar también IGW, route table y association | Un output existe para que alguien lo consuma: el humano que verifica, un comando, u otra fase. Los IDs de IGW/RT/association no los referencia nadie y su efecto se verifica mirando la ruta, no el ID. Un output que nadie lee es ruido en cada `apply` | No |
 | 2 | Cambio de modalidad de trabajo: Claude escribe el HCL paso a paso explicando cada campo antes de pegarlo; yo aprendo revisando | Seguir escribiendo yo el HCL con Claude revisando (modalidad de las Fases 0-2) | Escribir a ciegas contra la doc frenaba el avance sin agregar entendimiento: el cuello de botella no era teclear HCL sino saber qué campos existen y cuáles son las trampas. La explicación *antes* de cada bloque, más el `fmt`/`validate` por paso, conserva el objetivo original (entender cada campo). Registrado en `CLAUDE.md` | Sí — contradice la regla "escribo yo el HCL, vos revisás" de `CLAUDE.md`, que queda reemplazada desde el 14-ago-2026 |
+| 3 | `key = "tf-workshop/terraform.tfstate"`, con prefijo, en vez de la key pelada en la raíz del bucket | `key = "terraform.tfstate"` | Un bucket de estado normalmente hospeda varios estados (por proyecto, por entorno, por capa) y el prefijo es lo único que los separa. Acá hay uno solo, así que es previsión y no necesidad — pero es el campo **más caro de cambiar después**: cambiarlo hace que Terraform lea una key vacía, concluya que no existe nada y proponga recrear los 10 recursos mientras los actuales siguen vivos y huérfanos | No — el diseño no especificaba la key |
+| 3 | `use_lockfile = true`, sin tabla de DynamoDB | `dynamodb_table` (el patrón clásico, y lo que muestra la mayoría del material) | El lock nativo de S3 usa escrituras condicionales (`If-None-Match`) y deja un objeto `<key>.tflock` al lado del estado. Un recurso menos que crear, que pagar y que destruir. `dynamodb_table` quedó deprecado en Terraform 1.11+ y el requisito real (>= 1.10) ya estaba fijado en `required_version` desde la Fase 0 | No — ya estaba en `CLAUDE.md` como parámetro del proyecto; acá se ejecuta |
+| 3 | `encrypt = true` aunque el bucket ya tiene SSE-S3 por defecto desde la Fase 0 | Confiar en el cifrado por defecto del bucket | Son dos garantías distintas y viven en lugares distintos: una en la configuración del bucket (que alguien puede cambiar sin tocar el repo), la otra en el código versionado. El estado guarda secretos en texto plano; que la garantía esté escrita en el repo es lo que la vuelve auditable y revisable en un PR | No |
+| 3 | No borrar el `terraform.tfstate` local después de migrar | Limpiarlo para "no dejar basura" | Terraform lo deja a propósito como respaldo del origen de la migración, y el `.gitignore` ya lo cubre. Es la única copia del estado previo si la migración hubiera salido mal. Se elimina recién en el cierre de la Fase 9 | No |
+| 4 | Street Fighter II: **construir la imagen nosotros** desde el fuente `jkneb/street-fighter-css` + `nginx:alpine` | Retaggear y pushear `darmos/streetfighter`, que ya existía y funcionaba | Tres motivos, en orden de peso: (1) la imagen de tercero es de 2018 sobre **Debian stretch con nginx 1.13**, las dos EOL, y se iba a exponer en `0.0.0.0/0:80`; (2) el enunciado pide *buildear* y pushear a ECR — retaggear la imagen de otro saltea el ejercicio; (3) publisher desconocido con 101 pulls, sin auditar. Resultado medido: scan on push con **0 hallazgos** y 33 MiB comprimidos contra los 54 MiB de la de 2018 | No — el diseño dejaba la imagen "a definir" |
+| 4 | Elección verificada abriendo las capas de la imagen candidata, no leyendo su descripción | Confiar en el nombre y la descripción del repositorio de Docker Hub | Las descripciones estaban vacías en casi todos los candidatos. Bajando y destarando las capas se confirmó qué servía cada uno y en qué puerto: `tertiaryinfotech/street-fighter-game` era **solo arm64** (no bootea en `t3.micro`), `appachey` era un `php -S` en 8082, `rmelamud` y `alinablankselina` eran ~400 MB de Node, `simeontchakarov` ASP.NET en 8080. Solo `darmos` servía estático en 80 | No |
+| 4 | `.dockerignore` excluyendo `.git`, `scss`, `readme.md` y el propio `Dockerfile` | `COPY . /usr/share/nginx/html` a secas, como salió el primer Dockerfile | Sin él, nginx **sirve el `.git/` por HTTP**: 12,5 MB de packfiles desde los que se reconstruye el repo y su historial completo. Acá el fuente es público y no cambia nada, pero es el patrón exacto con el que se filtran credenciales en `.git/config` o en commits viejos. Verificado después del fix: `GET /.git/config` → **404** | No |
+| 4 | `docker build --provenance=false` | Dejar el default de buildx | Buildx exporta por defecto un *attestation manifest* junto a la imagen y convierte el push en una manifest list. En ECR eso aparece como **una segunda entrada con plataforma `unknown/unknown`** al lado de la imagen real, y el escaneo la reporta aparte. Con el flag el manifest quedó `v2` simple. Verificado: `imageManifestMediaType = application/vnd.docker.distribution.manifest.v2+json` | No |
+| 4 | `game_name` como variable, no string en el recurso | Escribir `"sf"` directo en `aws_ecr_repository.name` | Un solo valor alimenta dos puntas separadas por tres fases: el nombre del repo ECR (Fase 4) y el subdominio del registro DNS (Fase 7). Cambiar de juego es cambiar una línea. Sigue el criterio adoptado en Fase 2 | No |
+| 4 | `encryption_configuration` **omitido** a propósito | Declararlo con `encryption_type = "AES256"` | El default ya es `AES256` con clave gestionada por AWS — verificado en el `describe-repositories` post-apply. Declarar un default sin cambiarlo agrega ruido al HCL y hace creer que hubo una decisión donde no la hubo. Si hiciera falta CMK propia sería `encryption_type = "KMS"` + `kms_key` | No |
 
 ---
 
@@ -747,6 +1403,11 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | Puerto 8080 abierto a `0.0.0.0/0` en el SG | Debug: si el juego no responde en 80, permite aislar si el problema es el contenedor o el mapeo `-p 80:<puerto>` del `docker run`. Con el mapeo bien hecho, la regla es innecesaria incluso en el lab | El puerto de la aplicación nunca se expone a internet. Solo 443 desde el ALB, y el tráfico al puerto de la app queda dentro del SG del backend, con `referenced_security_group_id` en vez de un CIDR |
 | Egress abierto a todo destino (`ip_protocol = "-1"`, `0.0.0.0/0`) | La instancia necesita salir a ECR, a los repos de `yum` y a los endpoints de SSM, y enumerar esos destinos a mano en un lab no aporta | VPC endpoints (interface) para ECR, S3 y SSM, con egress restringido a esos endpoints y a `prefix_list_id` de S3. La instancia deja de necesitar salida a internet |
 | SG con `name` fijo en vez de `name_prefix` + `create_before_destroy` | El nombre sale de variables que no se tocan durante el lab | `name_prefix` + `create_before_destroy`: un cambio de nombre en un SG adjunto a instancias se traba porque AWS no permite borrar un SG en uso |
+| Tag `latest` mutable en ECR (`image_tag_mutability = "MUTABLE"`) | Permite corregir la imagen y volver a pushear `latest` sin cambiar nada del user_data. Con `IMMUTABLE` el segundo push falla | Tag inmutable por SHA del commit, `latest` inexistente. Con `latest` mutable no se puede saber qué versión está corriendo una instancia, y dos EC2 lanzadas con horas de diferencia pueden tener imágenes distintas con el mismo tag |
+| `FROM nginx:alpine` sin fijar digest | Simplicidad, y que la base quede siempre al día durante el lab | `FROM nginx:alpine@sha256:...`. Es **el mismo problema que `most_recent = true` en el data source de la AMI**: un tag móvil hace que dos builds del mismo Dockerfile, con semanas de diferencia, produzcan imágenes distintas. Reproducibilidad y pin explícito, con actualización deliberada del digest |
+| `force_delete = true` en el repositorio ECR | Sin esto el `terraform destroy` de la Fase 9 falla con `RepositoryNotEmptyException` y deja el destroy a medias | Sin `force_delete`: el borrado de un repositorio con imágenes tiene que ser una decisión explícita y no un efecto colateral de un `destroy`. Las imágenes son artefactos con trazabilidad, no basura recreable |
+| Assets del juego (sprites, música) con copyright de Capcom, repo fuente sin licencia | Es un lab interno con una URL efímera que se destruye en la Fase 9 | Contenido propio o con licencia verificada. Publicar esto como producto es un problema legal, no técnico |
+| Imagen construida y pusheada desde la notebook, con las access keys personales | Es el paso didáctico que pide el enunciado | Build y push desde el pipeline de CI/CD, con OIDC, tag = SHA del commit, y el registry como única fuente de artefactos desplegables |
 
 ---
 
@@ -831,6 +1492,73 @@ Explicados en criollo, como se los contaría a alguien. Prioridad a lo contraint
   cambió. Y el backend es el equivalente a tener el repo solo en tu disco versus tenerlo en un
   remoto compartido: mismo contenido, pero uno se pierde con la máquina y no permite trabajar
   de a dos.
+
+---
+
+### `lineage` y `serial`: dos campos del estado que casi nadie mira, y qué significan de verdad
+
+- **Qué son**: `serial` es un contador que sube en **cada escritura del archivo de estado**;
+  `lineage` es un UUID que identifica al estado como *linaje*, o sea como historia continua de
+  escrituras en un mismo lugar.
+
+- **Lo primero contraintuitivo**: el `serial` **no cuenta `apply`s**. Después del `apply` de 10
+  recursos de la Fase 2 quedó en **11**, no en 1. Terraform persiste el estado a medida que cada
+  recurso termina, no una vez al final — que es también la razón por la que un `apply` interrumpido
+  a la mitad no pierde lo que ya se creó.
+
+- **Lo segundo contraintuitivo, y me costó una predicción equivocada**: el lineage **cambia al
+  migrar de backend** si el destino está vacío, y eso es correcto. Verificado en el código de
+  Terraform (`internal/states/remote/state.go`, `PersistState`): si el backend remoto no tiene
+  snapshot previo, se genera un UUID nuevo y el serial arranca en 1. La migración de la Fase 3 dio
+  `bb05f068-...` → `8976e38b-...` con serial 11 → 1, y no se perdió ni un recurso.
+
+- **Para qué sirve entonces el lineage**: para detectar que **alguien reemplazó tu estado por otro
+  distinto en el mismo lugar**, entre dos escrituras al mismo backend. Ese es el escenario que
+  protege. Comparar lineages a través de una migración no prueba nada.
+
+- **El invariante correcto para juzgar una migración de backend** son tres cosas, ninguna de las
+  cuales es el lineage: (1) el conjunto de recursos en el destino, (2) que refresquen por sus IDs
+  reales, y (3) que el `plan` diga `No changes`.
+
+- **Qué creía antes**: que el lineage era el "número de serie" que probaba que el estado migrado
+  era el mismo. Es al revés de útil de lo que parecía. La lección general: antes de usar un campo
+  como criterio de aceptación, hay que saber **quién lo escribe y en qué momento** — si no, se está
+  verificando una intuición, no un hecho.
+
+---
+
+### El lock de estado es un objeto de S3, y se puede leer
+
+- **Qué es**: con `use_lockfile = true`, antes de cualquier operación Terraform hace un `PUT`
+  condicional (`If-None-Match`) de un objeto `<key>.tflock` al lado del estado. Si el objeto ya
+  existe, S3 rechaza la escritura y la segunda operación falla con `Error acquiring the state
+  lock`. Al terminar, lo borra.
+
+- **Por qué importa**: es lo que impide que dos `apply` simultáneos escriban el mismo objeto y
+  corrompan el estado. Sin lock no hay ninguna protección — el último en escribir gana y el otro
+  desaparece.
+
+- **Lo que no se suele ver**: el lock deja rastro en el bucket y **se puede inspeccionar**. Con
+  versioning activado quedan hasta los ciclos ya cerrados, como delete markers:
+
+  ```json
+  {"ID":"ea1f3de2-be0e-273c-e2a1-0ab301156572","Operation":"OperationTypePlan","Info":"",
+   "Who":"lucca@LUQUITA","Version":"1.15.8","Created":"2026-08-18T12:26:13.211078748Z",
+   "Path":"tf-state-workshop-lm-104981180500/tf-workshop/terraform.tfstate"}
+  ```
+
+  El campo `Who` es exactamente lo que aparece en el error del que se queda afuera, y `Operation`
+  dice si el que tiene el lock está planificando o aplicando. Cuando un lock queda huérfano porque
+  un `apply` murió a la mitad, **este objeto es el que hay que mirar antes de tocar
+  `force-unlock`** — dice quién y desde cuándo.
+
+- **Qué creía antes**: que el locking necesitaba DynamoDB porque S3 "no tiene transacciones". Lo
+  que faltaba no eran transacciones sino **escrituras condicionales**, que S3 sumó y que alcanzan
+  para un mutex. De ahí que `dynamodb_table` quedara deprecado en Terraform 1.11+.
+
+- **Trampa práctica encontrada**: `--prefix tf-workshop/terraform.tfstate` en
+  `list-object-versions` matchea **también** el `.tflock`. Al listar versiones de un estado hay que
+  proyectar `Key`, o se terminan leyendo dos objetos distintos creyendo que son versiones de uno.
 
 ---
 

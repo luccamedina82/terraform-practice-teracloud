@@ -60,6 +60,7 @@ es la herramienta, no AWS.
 | Cuenta | Limpia — no hay infra de labs anteriores corriendo |
 | Backend | S3 con `use_lockfile = true` (requiere Terraform >= 1.10), sin DynamoDB |
 | Bucket de estado | `tf-state-workshop-lm-104981180500` (creado por CLI en Fase 0) |
+| Key del estado | `tf-workshop/terraform.tfstate` — **no cambiar**: cambiarla equivale a perder el estado |
 | Perfil AWS | `default` |
 | Entorno local | WSL Ubuntu 26.04. Terraform v1.15.8 en `~/.local/bin` (binario, no `apt`) |
 | Repo | `/mnt/c/Users/lucca/desktop/teracloud/terraform-practice-teracloud` — se edita desde Windows, se ejecuta desde WSL |
@@ -114,16 +115,30 @@ Actualizar al cerrar cada fase.
 |---|---|
 | 0 — Bootstrap (perfil, bucket, repo, provider) | **cerrada** — `init` OK · `plan` "no changes" · `sts` OK · bucket creado y endurecido |
 | 1 — Data sources | **cerrada** — `apply` con `0 added` · zone `Z0909248Q51XTVKXPOG` · AMI `ami-07a5b367e8dc8bd92` |
-| 2 — Red | **código completo, sin aplicar** — `validate` OK · `plan` = `10 to add, 0 to change, 0 to destroy` · falta correr el `apply` y verificar por CLI |
-| 3 — Migración a backend S3 | pendiente |
-| 4 — ECR + push de la imagen | pendiente |
+| 2 — Red | **cerrada** (18-ago-2026) — `apply` OK, 10 recursos managed · verificado por CLI contra la API · VPC `vpc-09b6544aea696e9dd` · SG `sg-0b1c39e081bc25b04` |
+| 3 — Migración a backend S3 | **cerrada** (18-ago-2026) — `init -migrate-state` OK · objeto en S3 cifrado y versionado · 10 managed + 2 data preservados · `plan` = `No changes` |
+| 4 — ECR + push de la imagen | **cerrada** (18-ago-2026) — repo `sf-tf-workshop-lm` · imagen propia sobre `nginx:alpine` · `list-images` devuelve `latest` · scan on push con **0 hallazgos** |
 | 5 — IAM | pendiente |
 | 6 — EC2 + user_data | pendiente |
 | 7 — DNS | pendiente |
 | 8 — Drift e import | pendiente |
 | 9 — Cierre y destroy | pendiente |
 
-**Decisiones abiertas**: qué juego / imagen Docker y en qué puerto corre (muerde en Fase 4).
+**Decisiones abiertas**: ninguna.
+
+**Cerradas en Fase 4** — el juego y su puerto, que era la única decisión abierta del proyecto:
+
+| Parámetro | Valor |
+|---|---|
+| Juego | Street Fighter II, demo en CSS de `jkneb` (fuente: `github.com/jkneb/street-fighter-css`) |
+| Imagen | Construida por nosotros: `FROM nginx:alpine` + `COPY . /usr/share/nginx/html` + `.dockerignore` |
+| Puerto del contenedor | **80** (nginx). El `user_data` de la Fase 6 va con `docker run -d -p 80:80` |
+| `var.game_name` | `sf` — alimenta el nombre del repo ECR y el subdominio |
+| URL final | `http://sf.luccamedina.ownboarding.teratest.net` |
+| Digest en ECR | `sha256:9dd22a3cef18c5c93eb17d79d4a008d748ea32396f96625d1729421f44b8e6e9` |
+
+Como el contenedor escucha en 80 y se mapea `-p 80:80`, **la regla de ingress 8080 del SG queda sin
+uso**. Ya está anotada como fila de lab vs. producción; no se toca para no reabrir la Fase 2.
 
 **Cerradas en Fase 0**: bucket de estado `tf-state-workshop-lm-104981180500` · perfil AWS
 `default` · Terraform por binario en `~/.local/bin` en vez de `apt` (ver bitácora §3).
@@ -170,3 +185,32 @@ sigue sin haberse puesto a prueba.
 
 Si el `plan` dijera otra cosa que `10 to add`, parar: significa que alguien aplicó desde otro lado
 y hay que reconciliar antes de tocar nada.
+
+### 18-ago-2026 — la regla se activó y se desactivó el mismo día
+
+Por la mañana el `apply` de la Fase 2 **se corrió** desde la máquina con WSL, y el estado con los
+10 recursos managed quedó viviendo solo en ese disco. Ahí la regla de "una sola máquina" pasó de
+teórica a activa, y la Fase 3 dejó de ser el siguiente paso del plan para ser la mitigación de un
+riesgo real.
+
+Se hizo la Fase 3 a continuación. **El estado está ahora en
+`s3://tf-state-workshop-lm-104981180500/tf-workshop/terraform.tfstate`, cifrado, versionado y con
+lock nativo de S3.**
+
+**Consecuencia: la regla de "aplicar desde una sola máquina" queda LEVANTADA.** Ya se puede
+trabajar desde cualquiera de las dos:
+
+- Las dos leen y escriben el **mismo** estado, así que ninguna puede recrear lo que la otra creó.
+- `use_lockfile = true` impide que dos operaciones simultáneas se pisen: la segunda corta con
+  `Error acquiring the state lock` en vez de corromper el estado.
+- El versioning del bucket deja restaurable cada escritura anterior.
+
+Lo único que sigue sin viajar por git es `.terraform/` (caché de binarios por plataforma). En una
+máquina nueva sigue haciendo falta: `git pull` → `terraform init` → `terraform plan` (tiene que
+decir `No changes`). Y ojo con el `.terraform.lock.hcl`, que hoy solo tiene el hash `h1:` de
+`linux_amd64`: para usarlo desde Windows hay que declarar las dos plataformas con
+`terraform providers lock -platform=linux_amd64 -platform=windows_amd64`, no dejarlo librado a
+desde dónde se corrió el `init` (ver bitácora §3, tercer bloque).
+
+El `terraform.tfstate` local quedó en disco como respaldo de la migración. No borrarlo hasta la
+Fase 9.

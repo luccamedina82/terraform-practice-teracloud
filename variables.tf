@@ -56,3 +56,9 @@ variable "private_subnet_az" {
   description = "Zona de disponibilidad de la subnet privada. Distinta de la publica para mostrar que una subnet vive en una sola AZ."
   default     = "us-east-1b"
 }
+
+variable "game_name" {
+  type        = string
+  description = "Nombre corto del juego. Alimenta el nombre del repositorio ECR y el subdominio del registro DNS. Solo minusculas: ECR rechaza mayusculas en el nombre del repositorio."
+  default     = "sf"
+}
