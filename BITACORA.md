@@ -34,6 +34,9 @@ Completar con IDs reales al cerrar cada fase.
 | Attachment ECR (Fase 5) | — | id compuesto `role-ec2-tf-workshop-lm/arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly` | Habilita el `docker pull` del user_data. Incluye `ecr:GetAuthorizationToken`, que es un permiso a nivel cuenta y no de repositorio | No |
 | Attachment SSM (Fase 5) | — | id compuesto `role-ec2-tf-workshop-lm/arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore` | Habilita Session Manager. Por esto el SG no abre el 22 y no hay key pair en el proyecto | No |
 | Instance profile (Fase 5) | `profile-ec2-tf-workshop-lm` | `AIPARQ4K5WBKHX6MIHWCV` (ARN `arn:aws:iam::104981180500:instance-profile/profile-ec2-tf-workshop-lm`) | Envuelve a `role-ec2-tf-workshop-lm`. Es lo único que la API de EC2 sabe consumir: `RunInstances` no acepta un rol | No |
+| Instancia EC2 (Fase 6) | `ec2-tf-workshop-lm` | `i-038459aacc0d1e104` | `t3.micro` · AMI `ami-02b3d83d84b07786d` · `us-east-1a` · privada `10.0.1.217` · pública `3.234.229.254` · IMDS `http_tokens = required` · instance profile `profile-ec2-tf-workshop-lm` · lanzada `2026-08-18T13:34:27Z` | **Sí, es lo único que factura de verdad.** `t3.micro` on-demand en `us-east-1`, más el EBS. Se apaga con el `destroy` de la Fase 9 |
+| Volumen raíz EBS (Fase 6) | `ebs-root-tf-workshop-lm` | `vol-04d558ac501e8f649` | `gp3` · 8 GiB · `Encrypted: true` con la clave gestionada `aws/ebs` (`b6061ea6-87f4-4eb9-9557-369729891ccb`) | Sí, se cobra por GiB-mes mientras exista. Lo borra el `destroy` junto con la instancia |
+| Contenedor del juego (Fase 6, **creado por el user_data, no por Terraform**) | `sf` | `a7f050feb3d3` | Imagen `sf-tf-workshop-lm:latest`, digest `sha256:9dd22a3c…f44b8e6e9` — **idéntico al pusheado en Fase 4** · `-p 80:80` · `--restart unless-stopped` | No por separado: vive dentro de la EC2 |
 
 ---
 
@@ -1137,6 +1140,222 @@ politicas gestionadas, y pestana Trust relationships con el principal ec2.amazon
 
 ---
 
+### [Fase 6] — EC2 con user_data: del `.tftpl` al HTTP 200 desde internet
+
+Config agregada: `scripts/user-data.sh.tftpl`, `compute.tf`, 4 variables (`instance_type`,
+`image_tag`, `host_port`, `container_port`) y 2 outputs (`instance_id`, `instance_public_ip`).
+
+#### Paso previo: renderizar la plantilla ANTES de tocar AWS
+
+La verificación más rentable de toda la fase, y no cuesta nada:
+
+```bash
+echo 'templatefile("scripts/user-data.sh.tftpl", {
+  region = "us-east-1", registry = "104981180500.dkr.ecr.us-east-1.amazonaws.com",
+  ecr_url = "104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm",
+  image_tag = "latest", container_name = "sf", host_port = 80, container_port = 80 })' \
+  | terraform console
+```
+
+Ejercita exactamente el mismo código que va a correr el `apply`, en local y sin crear nada.
+**Encontró dos errores, y ninguno de los dos habría dado un mensaje útil desde una instancia:**
+
+1. **Los comentarios del propio script rompían la plantilla.** El archivo tenía, dentro de líneas
+   que empiezan con `#`, las secuencias de interpolación y de directiva escritas literalmente para
+   explicarlas. **Terraform no distingue código de comentario**: el `#` es de bash, no de la
+   plantilla. Iba a intentar interpolar una variable inexistente y a leer una directiva inválida.
+   El `templatefile()` habría fallado en el `plan`. Se resolvió describiendo la sintaxis con
+   palabras en lugar de mostrarla.
+2. **El `docker login` apuntaba al repositorio en vez de al registry.** `repository_url` incluye el
+   path (`.../sf-tf-workshop-lm`), y `docker login` espera solo el host. En el push manual de la
+   Fase 4 estaba bien —`REG` para el login, `ECR` para el tag— y al pasarlo a plantilla se
+   mezclaron. Este solo se ve **leyendo el render**, no el fuente. Se corrigió pasando el host como
+   variable aparte, calculada en HCL:
+
+   ```hcl
+   registry = split("/", aws_ecr_repository.game.repository_url)[0]
+   ```
+
+   Se descartó recortarlo en bash: la sintaxis de recorte de shell choca con la de Terraform y
+   habría que escaparla, y la lógica se lee mejor en HCL.
+
+#### El choque de sintaxis de `templatefile()` con un script de shell
+
+| Secuencia | Quién la interpreta | Qué hacer si es literal |
+|---|---|---|
+| interpolación (dólar + llave) | **Terraform** | duplicar el dólar |
+| directiva (porcentaje + llave) | **Terraform** | duplicar el porcentaje |
+| sustitución de comando `$(...)` | solo bash | nada, pasa intacta |
+
+Terraform solo mira esas dos aperturas. Por eso los `$(date -u ...)` del script pasan sin tocarse,
+pero el `-w` de `curl` con `%{http_code}` **habría roto el `templatefile()`**: hay que duplicar el
+porcentaje. Verificado en el render, donde baja correctamente a `%{http_code}`.
+
+#### Chequeo obligatorio de CRLF (el riesgo abierto desde la Fase 0)
+
+```bash
+file scripts/user-data.sh.tftpl
+grep -c $'\r' scripts/user-data.sh.tftpl
+head -c 20 scripts/user-data.sh.tftpl | od -c
+bash -n scripts/user-data.sh.tftpl
+```
+
+```
+scripts/user-data.sh.tftpl: Bourne-Again shell script, ASCII text executable
+CR encontrados: 0
+0000000   #   !   /   b   i   n   /   b   a   s   h  \n   #       -   -
+sintaxis OK
+```
+
+Sin `CRLF line terminators` en la salida de `file`, cero retornos de carro, y el `od -c` muestra
+`\n` justo después del shebang. `.gitattributes` línea 11 (`*.tftpl text eol=lf`) más el
+`.editorconfig` sostienen las dos mitades del problema. **Riesgo de `DISENO.md` §6 cerrado con
+evidencia.**
+
+Bonus: `bash -n` valida la sintaxis del script **sin ejecutarlo**, y funciona igual sobre el
+`.tftpl` sin renderizar, porque las interpolaciones son sintácticamente expansiones de parámetro
+válidas para bash.
+
+#### El riesgo del SSM Agent, disuelto en vez de mitigado
+
+`DISENO.md` §6 anticipaba: *"si el paquete `amazon-ssm-agent` no existe, `yum install` falla y
+**tampoco instala Docker**"*, con la mitigación de separar en dos `yum install`.
+
+Verificado contra la doc de AWS ("Find AMIs with the SSM Agent preinstalled"): **AL2023 lo trae
+preinstalado**. Textual — *"you'll likely find that the SSM Agent is already installed: … Amazon
+Linux 2023 (AL2023)"*, con la advertencia de verificar igual. Así que el script no lo instala: lo
+habilita y comprueba con `systemctl enable --now` + `systemctl is-active`. El escenario de fallo
+desaparece porque desaparece el `install`.
+
+#### `plan` y campos clave
+
+```
+Plan: 1 to add, 0 to change, 0 to destroy.
+
++ ami                         = "ami-02b3d83d84b07786d"
++ instance_type               = "t3.micro"
++ subnet_id                   = "subnet-0033c17b9c7ec238c"
++ iam_instance_profile        = "profile-ec2-tf-workshop-lm"
++ user_data_replace_on_change = true
++ http_tokens                 = "required"
++ volume_type                 = "gp3"    encrypted = true
+```
+
+#### Verificación desde afuera
+
+```bash
+aws ec2 describe-instances --instance-ids i-038459aacc0d1e104
+aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=i-038459aacc0d1e104"
+aws ssm describe-instance-information --filters "Key=InstanceIds,Values=i-038459aacc0d1e104"
+curl -sS -o /dev/null -w '%{http_code} %{size_download}B %{time_total}s\n' http://3.234.229.254/
+```
+
+```json
+{ "state": "running", "type": "t3.micro", "az": "us-east-1a",
+  "privIP": "10.0.1.217", "pubIP": "3.234.229.254",
+  "profile": "arn:aws:iam::104981180500:instance-profile/profile-ec2-tf-workshop-lm",
+  "imds": "required", "launch": "2026-08-18T13:34:27Z" }
+
+{ "id": "vol-04d558ac501e8f649", "type": "gp3", "size": 8, "enc": true,
+  "kms": "arn:aws:kms:us-east-1:104981180500:key/b6061ea6-87f4-4eb9-9557-369729891ccb" }
+
+{ "id": "i-038459aacc0d1e104", "ping": "Online", "agent": "3.3.4624.0",
+  "platform": "Amazon Linux", "version": "2023", "lastPing": "2026-08-18T13:37:17Z" }
+```
+
+```
+raiz:        HTTP 200  1389B  en 0.355574s
+ken.js:      HTTP 200  8377B
+ken.png:     HTTP 200  120943B
+git leak:    HTTP 404
+Server: nginx/1.31.3
+```
+
+**`PingStatus: Online` es la verificación de mayor densidad de toda la fase.** Prueba de una sola
+vez tres cosas independientes: que el instance profile llegó a la instancia, que el rol tiene
+`AmazonSSMManagedInstanceCore`, y que hay salida a internet por el egress del SG. Si eso está en
+verde, IAM y red están descartados como causa de cualquier otro problema.
+
+El `404` en `/.git/config` confirma en producción lo que se había verificado en local: el
+`.dockerignore` dejó el repositorio afuera de la imagen.
+
+#### Verificación desde adentro, sin abrir sesión
+
+`aws ssm start-session` necesita una terminal interactiva, pero **`send-command` no**, así que sirve
+para inspeccionar la instancia desde un script:
+
+```bash
+aws ssm send-command --instance-ids i-038459aacc0d1e104 \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["docker ps","cloud-init status --long","tail -25 /var/log/user-data.log"]'
+aws ssm get-command-invocation --command-id <id> --instance-id <id>
+```
+
+```
+{ "status": "Success", "rc": 0 }
+
+===== DOCKER PS =====
+sf | 104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm:latest | Up 3 minutes | 0.0.0.0:80->80/tcp, :::80->80/tcp
+
+===== CURL LOCAL =====
+local: HTTP 200
+
+===== CLOUD-INIT =====
+status: done
+time: Tue, 18 Aug 2026 13:35:48 +0000
+detail:
+DataSourceEc2
+
+===== ULTIMAS LINEAS DEL USER-DATA LOG =====
+Digest: sha256:9dd22a3cef18c5c93eb17d79d4a008d748ea32396f96625d1729421f44b8e6e9
+Status: Downloaded newer image for 104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm:latest
++ docker rm -f sf
++ docker run -d --name sf --restart unless-stopped -p 80:80 104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm:latest
+a7f050feb3d32d8556293b51e879d3ef2695f5ff31fe67956a369938a331df86
++ sleep 3
++ docker ps
++ curl -sS -o /dev/null -w 'health local: HTTP %{http_code}\n' http://localhost:80/
+health local: HTTP 200
+++ date -u +%Y-%m-%dT%H:%M:%SZ
++ echo '== user_data termina OK: 2026-08-18T13:35:48Z =='
+== user_data termina OK: 2026-08-18T13:35:48Z ==
+
+===== ERRORES EN EL LOG =====
+SIN-ERRORES
+
+===== SERVICIOS =====
+active
+active
+```
+
+**Las tres lecturas que valen:**
+
+1. **`== user_data termina OK ==` es la verificación entera, en una línea.** Con `set -e` activo, el
+   script muere en el primer comando que devuelva distinto de cero. Que la última línea haya salido
+   significa que **todos** los comandos anteriores devolvieron cero. No hace falta auditar el log:
+   alcanza con comprobar que el `echo` final está. Es la razón concreta por la que conviene cerrar
+   todo `user_data` con un marcador de fin.
+2. **El log tiene la traza de `set -x`** (`+ docker run -d --name sf ...`). Si algo hubiera fallado,
+   el log diría en qué comando exacto murió, no solo que murió. Esa es la diferencia entre
+   diagnosticar y adivinar cuando el síntoma aparece a tres capas de la causa.
+3. **El digest que bajó la instancia es idéntico al que se pusheó desde la notebook**
+   (`sha256:9dd22a3c…f44b8e6e9`). Cierra la cadena de trazabilidad completa: fuente en GitHub →
+   `docker build` local → push a ECR → `docker pull` de la EC2 → HTTP 200 desde internet.
+
+**Tiempo total del arranque**: instancia lanzada `13:34:27`, `user_data` terminado `13:35:48` — **81
+segundos** para instalar Docker, autenticarse contra ECR, bajar 33 MiB y levantar el contenedor.
+Dato importante de operación: el `apply` de Terraform vuelve mucho antes, cuando AWS reporta
+`running`. Entre que el `apply` dice "listo" y el juego responde hay más de un minuto, y eso **no
+es un fallo**.
+
+`CAPTURA PENDIENTE -- el juego cargado en el navegador contra la IP publica, con Ken y Guile en
+pantalla y la tabla de controles visible`
+
+`CAPTURA PENDIENTE -- consola de EC2, instancia i-038459aacc0d1e104, pestana Details: se tienen que
+ver el IAM Role profile-ec2-tf-workshop-lm y IMDSv2 = Required`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -1619,6 +1838,12 @@ cambiaron de opinión a mitad de camino.
 | 5 | `aws_iam_role_policy_attachment` como recursos separados | `managed_policy_arns` dentro del `aws_iam_role` | **Es el mismo dilema que las reglas de SG inline vs. separadas de la Fase 2, y se resuelve igual.** `managed_policy_arns` es exclusivo: Terraform saca del rol cualquier política adjuntada por fuera, en cada `apply`. El attachment separado convive. Se ve en el `plan`: con attachments, el rol muestra `managed_policy_arns = (known after apply)` — sabe que va a tener contenido pero no lo gobierna. Lo que nunca hay que hacer es mezclar los dos estilos sobre el mismo rol | No |
 | 5 | Sin outputs para el rol ni el instance profile | Exportar sus ARNs "por las dudas" | Mismo criterio que en la Fase 2 con el IGW y la route table: un output existe para que alguien lo consuma. Estos IDs no los referencia ninguna fase posterior — la EC2 de la Fase 6 referencia el recurso directamente, no un output — ni ningún comando de verificación. Un output que nadie lee es ruido en cada `apply` | No |
 | 5 | Session Manager en lugar de SSH, decidido desde IAM y no desde la red | Key pair + regla de ingress en el 22 | Es una decisión de IAM que **determina la superficie de red**: con `AmazonSSMManagedInstanceCore` el agente sale hacia los endpoints de SSM por la regla de egress y la sesión entra por ese canal ya establecido, así que no hace falta abrir ningún puerto de entrada ni distribuir una clave privada. Explica retroactivamente por qué el SG de la Fase 2 no tiene el 22 | No — `DISENO.md` ya listaba la política; acá se documenta la consecuencia |
+| 6 | `user_data_replace_on_change = true` | Dejar el default `false` | Es el argumento que decide si la fase es frustrante. `cloud-init` ejecuta el `user_data` **solo en el primer arranque**: con el default, corregir el script actualiza el atributo en el estado, el `apply` reporta `1 changed`, y la instancia sigue corriendo el script viejo. Fallo silencioso y con confirmación de éxito. Con `true`, cambiar el script destruye y recrea, que es lo único que hace que un `user_data` nuevo se ejecute | No — el diseño no lo mencionaba |
+| 6 | `metadata_options { http_tokens = "required" }` | El default `optional` | Con `optional`, IMDSv1 sigue habilitado: un `GET` sin token devuelve las credenciales del rol, y cualquier SSRF en la aplicación se convierte en robo de credenciales. La AMI declara `imds_support: v2.0`, pero eso es una propiedad de la imagen — el que manda es este campo de la instancia | No — agrega al diseño |
+| 6 | `root_block_device` con `gp3` y `encrypted = true` | Dejar el default de la AMI | `encrypted` es `false` por defecto (verificado en la doc del provider) y el cifrado de EBS no tiene costo adicional. `gp3` es más barato y con mejor baseline que `gp2`. Tres líneas para no dejar un disco sin cifrar | Sí, agrega al diseño: `DISENO.md` §3 no preveía el bloque |
+| 6 | El host del registry se calcula en HCL con `split()`, no recortando el string en bash | `$${ecr_url%%/*}` dentro del script | La sintaxis de recorte de shell choca con la de interpolación de Terraform y habría que escaparla, quedando ilegible. La lógica en HCL se lee mejor y se ve en el `plan`. Además el error original —hacer `docker login` contra el repositorio en vez del registry— solo se detectó **leyendo el render**, no el fuente | No |
+| 6 | El SSM Agent **no** se instala: solo se habilita y verifica | Instalarlo, como preveía la mitigación de `DISENO.md` §6 | Verificado contra la doc de AWS: AL2023 lo trae preinstalado. El riesgo anotado —"si el paquete no existe, el `install` falla y tampoco instala Docker"— **desaparece porque desaparece el `install`**, que es mejor que mitigarlo separando comandos | Sí — reemplaza la mitigación planificada por una que elimina la causa |
+| 6 | Renderizar la plantilla con `terraform console` antes de aplicar | Confiar en `validate` y descubrirlo en el `apply` | `validate` no evalúa `templatefile()` con valores concretos. El render local encontró dos errores: comentarios del script que rompían la plantilla, y el `docker login` apuntando al repositorio en vez del registry. El segundo **no se ve en el fuente**, solo en el render, y habría fallado dentro de una instancia ya lanzada | No — es método, no diseño |
 
 ---
 
@@ -1641,6 +1866,10 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | Imagen construida y pusheada desde la notebook, con las access keys personales | Es el paso didáctico que pide el enunciado | Build y push desde el pipeline de CI/CD, con OIDC, tag = SHA del commit, y el registry como única fuente de artefactos desplegables |
 | `AmazonEC2ContainerRegistryReadOnly` (política gestionada por AWS) en vez de una propia | Es la que pide el enunciado y evita escribir una política a mano en un lab | Da lectura sobre **todos** los repositorios de la cuenta, no solo el del juego, e incluye `ecr:GetAuthorizationToken` a nivel cuenta. En producción: política propia con `Resource` apuntando al ARN del repositorio concreto. Las políticas gestionadas de AWS son un punto de partida cómodo y casi nunca son de mínimo privilegio |
 | Un solo rol para las dos responsabilidades (pull de ECR y acceso por SSM) | Alcance del lab: una instancia, un propósito | Separación por función, con roles distintos para el acceso operativo y para el consumo de artefactos. Acá cualquiera que consiga una sesión por SSM hereda también el permiso de lectura sobre todo ECR |
+| IP pública directa, sin Elastic IP, y el registro DNS apuntando a ella | Simplicidad del lab | La IP cambia con cada `stop`/`start` y con cada reemplazo de la instancia — y `user_data_replace_on_change = true` hace que **cualquier cambio del script reemplace la instancia y por lo tanto la IP**. En producción: ALB con registro Alias, o al menos una EIP |
+| `set -euxo pipefail` con `-x` en el `user_data` | El trace es lo que permite saber en qué comando exacto murió el script, cuando el síntoma aparece a tres capas de la causa | El trace puede filtrar valores sensibles pasados como argumento a un comando. Acá no pasa —el token de ECR viaja por un pipe, no por `argv`— pero en un script que reciba secretos por parámetro hay que desactivar `-x` en ese tramo |
+| El contenedor corre como `root` dentro de la imagen `nginx:alpine` | Es el default de la imagen oficial y el lab no lo requiere | Usuario sin privilegios en el contenedor, `--read-only` en el filesystem, y `--cap-drop ALL` salvo lo indispensable |
+| Sin health check ni reinicio automático más allá de `--restart unless-stopped` | Alcance del lab | Health check del orquestador que reemplace la tarea cuando deja de responder. `--restart` solo cubre que el proceso muera, no que se cuelgue respondiendo mal |
 
 ---
 

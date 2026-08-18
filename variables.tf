@@ -62,3 +62,27 @@ variable "game_name" {
   description = "Nombre corto del juego. Alimenta el nombre del repositorio ECR y el subdominio del registro DNS. Solo minusculas: ECR rechaza mayusculas en el nombre del repositorio."
   default     = "sf"
 }
+
+variable "instance_type" {
+  type        = string
+  description = "Tipo de instancia EC2. t3.micro alcanza de sobra para un nginx sirviendo archivos estaticos."
+  default     = "t3.micro"
+}
+
+variable "image_tag" {
+  type        = string
+  description = "Tag de la imagen en ECR que levanta el user_data. Mutable a proposito en el lab: permite corregir la imagen y volver a pushear sin tocar el HCL."
+  default     = "latest"
+}
+
+variable "host_port" {
+  type        = number
+  description = "Puerto del host donde se publica el contenedor. Tiene que coincidir con una regla de ingress del SG."
+  default     = 80
+}
+
+variable "container_port" {
+  type        = number
+  description = "Puerto donde escucha el proceso dentro del contenedor. Para la imagen del juego es el 80 de nginx."
+  default     = 80
+}

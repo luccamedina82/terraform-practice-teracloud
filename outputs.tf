@@ -47,3 +47,13 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.game.repository_url
   description = "URL del repositorio ECR, con formato <account>.dkr.ecr.<region>.amazonaws.com/<repo>. Se usa a mano en el docker tag y el docker push de la Fase 4, y la interpola el user_data de la Fase 6."
 }
+
+output "instance_id" {
+  value       = aws_instance.game.id
+  description = "ID de la instancia. Es lo que consume aws ssm start-session para abrir una sesion sin SSH."
+}
+
+output "instance_public_ip" {
+  value       = aws_instance.game.public_ip
+  description = "IP publica de la instancia. La consume el registro A de la Fase 7 y sirve para probar el juego antes de que exista el DNS. Cambia con cada stop/start: no hay Elastic IP."
+}

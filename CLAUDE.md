@@ -119,7 +119,7 @@ Actualizar al cerrar cada fase.
 | 3 — Migración a backend S3 | **cerrada** (18-ago-2026) — `init -migrate-state` OK · objeto en S3 cifrado y versionado · 10 managed + 2 data preservados · `plan` = `No changes` |
 | 4 — ECR + push de la imagen | **cerrada** (18-ago-2026) — repo `sf-tf-workshop-lm` · imagen propia sobre `nginx:alpine` · `list-images` devuelve `latest` · scan on push con **0 hallazgos** |
 | 5 — IAM | **cerrada** (18-ago-2026) — rol `role-ec2-tf-workshop-lm` · 2 políticas adjuntas · instance profile `AIPARQ4K5WBKHX6MIHWCV` contiene el rol, verificado por CLI |
-| 6 — EC2 + user_data | pendiente |
+| 6 — EC2 + user_data | **cerrada** (18-ago-2026) — `i-038459aacc0d1e104` · IP `3.234.229.254` · SSM `Online` · `user_data termina OK` en 81 s · HTTP 200 desde internet · digest idéntico al pusheado |
 | 7 — DNS | pendiente |
 | 8 — Drift e import | pendiente |
 | 9 — Cierre y destroy | pendiente |

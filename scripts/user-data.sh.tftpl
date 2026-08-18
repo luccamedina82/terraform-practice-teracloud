@@ -1,0 +1,72 @@
+#!/bin/bash
+# ---------------------------------------------------------------------------
+# user_data de la EC2 del juego. Lo ejecuta cloud-init como root, una sola vez,
+# en el primer arranque de la instancia.
+#
+# OJO con la sintaxis: este archivo pasa por templatefile() antes de llegar a la
+# instancia, y Terraform no distingue codigo de comentario. Interpreta las
+# interpolaciones (dolar + llave) y las directivas (porcentaje + llave), incluso
+# dentro de una linea que empieza con #. En cambio $(...) lo ignora, asi que las
+# sustituciones de comando de bash pasan intactas.
+#
+# Consecuencia practica: el -w de curl, mas abajo, lleva el porcentaje duplicado.
+# Escrito con un solo porcentaje, Terraform lo leeria como una directiva y el
+# templatefile() fallaria antes de llegar a AWS.
+#
+# Este archivo tiene que quedar con finales de linea LF. Con CRLF, cloud-init
+# busca el interprete "/bin/bash\r", no lo encuentra, y el script no corre sin
+# dejar ningun error visible.
+# ---------------------------------------------------------------------------
+
+set -euxo pipefail
+
+# Todo a tres destinos: el archivo de log, el syslog, y /dev/console -- este
+# ultimo es el que se lee desde "Get system log" en la consola de EC2, sin
+# necesidad de entrar a la instancia.
+exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "== user_data arranca: $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+
+# --- Docker -----------------------------------------------------------------
+# AL2023 usa dnf; yum quedo como symlink de compatibilidad.
+dnf install -y docker
+systemctl enable --now docker
+
+# Para poder correr docker sin sudo. Ojo: una sesion de SSM ya abierta NO toma
+# el grupo nuevo -- la membresia se resuelve al iniciar sesion. Sesion nueva.
+usermod -aG docker ec2-user
+
+# --- SSM Agent --------------------------------------------------------------
+# Viene preinstalado en AL2023 (doc de AWS: "Find AMIs with the SSM Agent
+# preinstalled"). No se instala: solo se habilita y se verifica.
+systemctl enable --now amazon-ssm-agent
+systemctl is-active amazon-ssm-agent
+
+# --- Login a ECR y pull de la imagen ----------------------------------------
+# Las credenciales salen del instance profile via IMDS; no hay claves en disco.
+# --password-stdin para que el token no quede en la tabla de procesos.
+#
+# El login va contra el REGISTRY (solo el host), no contra el repositorio:
+# registry = 1234.dkr.ecr.us-east-1.amazonaws.com
+# ecr_url  = 1234.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm
+aws ecr get-login-password --region ${region} \
+  | docker login --username AWS --password-stdin ${registry}
+
+docker pull ${ecr_url}:${image_tag}
+
+# --- Arranque del contenedor ------------------------------------------------
+# El rm previo hace el script reejecutable a mano sin chocar con el nombre.
+docker rm -f ${container_name} 2>/dev/null || true
+
+docker run -d \
+  --name ${container_name} \
+  --restart unless-stopped \
+  -p ${host_port}:${container_port} \
+  ${ecr_url}:${image_tag}
+
+# --- Verificacion desde adentro ---------------------------------------------
+sleep 3
+docker ps
+curl -sS -o /dev/null -w 'health local: HTTP %%{http_code}\n' http://localhost:${host_port}/
+
+echo "== user_data termina OK: $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
