@@ -37,6 +37,8 @@ Completar con IDs reales al cerrar cada fase.
 | Instancia EC2 (Fase 6) | `ec2-tf-workshop-lm` | `i-038459aacc0d1e104` | `t3.micro` · AMI `ami-02b3d83d84b07786d` · `us-east-1a` · privada `10.0.1.217` · pública `3.234.229.254` · IMDS `http_tokens = required` · instance profile `profile-ec2-tf-workshop-lm` · lanzada `2026-08-18T13:34:27Z` | **Sí, es lo único que factura de verdad.** `t3.micro` on-demand en `us-east-1`, más el EBS. Se apaga con el `destroy` de la Fase 9 |
 | Volumen raíz EBS (Fase 6) | `ebs-root-tf-workshop-lm` | `vol-04d558ac501e8f649` | `gp3` · 8 GiB · `Encrypted: true` con la clave gestionada `aws/ebs` (`b6061ea6-87f4-4eb9-9557-369729891ccb`) | Sí, se cobra por GiB-mes mientras exista. Lo borra el `destroy` junto con la instancia |
 | Contenedor del juego (Fase 6, **creado por el user_data, no por Terraform**) | `sf` | `a7f050feb3d3` | Imagen `sf-tf-workshop-lm:latest`, digest `sha256:9dd22a3c…f44b8e6e9` — **idéntico al pusheado en Fase 4** · `-p 80:80` · `--restart unless-stopped` | No por separado: vive dentro de la EC2 |
+| Route table privada (Fase 8, **creada a mano por CLI e importada**) | `rt-private-tf-workshop-lm` | `rtb-0d72256c04bdb191d` | Sin bloque `route`: única ruta `10.0.0.0/16 → local`. Importada con 1 tag y convergida a 4 por los `default_tags` | No |
+| Association de la route table privada (Fase 8, **creada a mano e importada**) | — | `rtbassoc-0979324d6bcf3e620` — **ojo: se importa con el id compuesto `subnet-03eb6819b955061da/rtb-0d72256c04bdb191d`, que no es el id del objeto** | Saca la subnet privada de la main route table de la VPC | No |
 | Registro DNS tipo A (Fase 7) | `sf.luccamedina.ownboarding.teratest.net` | `Z0909248Q51XTVKXPOG_sf.luccamedina.ownboarding.teratest.net_A` (ID compuesto: zona + nombre + tipo, no un ID de AWS) | `A` → `3.234.229.254` · `ttl = 60` · `allow_overwrite` en su default `false` · **sin tags: los registros de Route53 no son taggables** | Prácticamente no: Route53 cobra por millón de consultas y por hosted zone, y la zona ya existía. Un registro A no-alias suma consultas facturables, a diferencia de un Alias, que no las cobra |
 
 ---
@@ -1477,6 +1479,257 @@ listado de registros: se tiene que ver el A de sf apuntando a 3.234.229.254 con 
 
 ---
 
+### [Fase 8] — Drift visible, drift invisible, e import hasta cero diff
+
+Tres ejercicios encadenados en vez de dos sueltos: el recurso del ejercicio 2 es el mismo que se
+importa en el 3, así que la fase cuenta una historia sola.
+
+#### Ejercicio 1 — drift sobre un recurso administrado
+
+Cambio provocado por CLI sobre un atributo que Terraform sí gobierna:
+
+```bash
+aws ec2 create-tags --region us-east-1 --resources i-038459aacc0d1e104 \
+  --tags Key=Name,Value=ec2-tocada-a-mano
+```
+
+```
+terraform plan -refresh-only
+
+Note: Objects have changed outside of Terraform
+
+  # aws_instance.game has changed
+  ~ resource "aws_instance" "game" {
+      ~ tags     = {
+          ~ "Name" = "ec2-tf-workshop-lm" -> "ec2-tocada-a-mano"
+        }
+      ~ tags_all = {
+          ~ "Name"        = "ec2-tf-workshop-lm" -> "ec2-tocada-a-mano"
+            # (3 unchanged elements hidden)
+        }
+    }
+
+This is a refresh-only plan, so Terraform will not take any actions to undo these.
+```
+
+El mismo drift, visto por el `plan` común:
+
+```
+terraform plan
+
+  # aws_instance.game will be updated in-place
+  ~ resource "aws_instance" "game" {
+      ~ tags     = {
+          ~ "Name" = "ec2-tocada-a-mano" -> "ec2-tf-workshop-lm"
+        }
+    }
+
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+**La flecha se da vuelta, y ahí está la fase entera.**
+
+| Comando | Compara | Diff | Responde |
+|---|---|---|---|
+| `plan -refresh-only` | estado ↔ realidad | `tf-workshop-lm -> tocada-a-mano` | ¿Qué **pasó**? |
+| `plan` | estado refrescado ↔ configuración | `tocada-a-mano -> tf-workshop-lm` | ¿Qué **pasaría**? |
+
+El `plan` común también refresca — la detección de drift no es exclusiva de `-refresh-only`. La
+diferencia es que el común muestra el **resultado neto** y el drift queda mezclado con los cambios
+que uno sí pidió. En un repo con veinte recursos y un cambio en curso, un drift ajeno pasa
+desapercibido; `-refresh-only` lo aísla.
+
+Se ve también, por primera vez en el proyecto y en un diff real, la diferencia entre `tags`
+(lo declarado) y `tags_all` (la fusión con los `default_tags` del provider): los
+`# (3 unchanged elements hidden)` son `Environment`, `ManagedBy` y `Repository`.
+
+**Las dos salidas del drift, y por qué elegir mal es caro:**
+
+- `terraform apply` — gana la **configuración**. Revierte AWS. Es lo correcto cuando el cambio manual
+  no era legítimo.
+- `terraform apply -refresh-only` — gana la **realidad**. Escribe el valor nuevo en el estado y no
+  toca AWS. Trampa: **no modifica el HCL**, así que el siguiente `plan` común vuelve a proponer la
+  reversión. Solo sirve acompañado de un cambio en el código.
+
+Cierre del ejercicio:
+
+```
+aws_instance.game: Modifying... [id=i-038459aacc0d1e104]
+aws_instance.game: Modifications complete after 4s
+Apply complete! Resources: 0 added, 1 changed, 0 destroyed.
+```
+
+```bash
+aws ec2 describe-instances --instance-ids i-038459aacc0d1e104 \
+  --query "Reservations[].Instances[].Tags[?Key=='Name'].Value" --output text
+ec2-tf-workshop-lm
+```
+
+4 segundos y sin reemplazo: los tags de una instancia se modifican en caliente.
+
+#### Ejercicio 2 — el drift que Terraform no puede ver
+
+Recurso creado **entero** por fuera, con un solo tag a propósito (lo que haría alguien apurado por
+consola):
+
+```bash
+aws ec2 create-route-table --vpc-id vpc-09b6544aea696e9dd \
+  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=rt-private-tf-workshop-lm}]"
+# -> rtb-0d72256c04bdb191d
+
+aws ec2 associate-route-table --route-table-id rtb-0d72256c04bdb191d \
+  --subnet-id subnet-03eb6819b955061da
+# -> rtbassoc-0979324d6bcf3e620
+```
+
+```
+terraform plan -refresh-only
+
+No changes. Your infrastructure still matches the configuration.
+```
+
+**Terraform está ciego, y la frase que devuelve es engañosa.** "Your infrastructure still matches the
+configuration" suena a que auditó la cuenta. No lo hizo: `refresh` recorre **los recursos que están
+en el estado**, uno por uno, y le pregunta a la API por cada uno. No hace inventario. Lo confirma
+`terraform state list`, donde no aparece ninguna route table privada mientras el objeto existe,
+está asociado y está ruteando tráfico.
+
+Es el límite conceptual de la herramienta: **Terraform detecta cambios sobre lo que administra, no
+recursos que no administra**. Para lo segundo hacen falta otras herramientas — AWS Config, Cloud
+Custodian, o un `describe` comparado contra el estado.
+
+#### Ejercicio 3 — import
+
+Dos mecanismos, y la elección importa:
+
+| | `terraform import ADDR ID` | Bloque `import {}` (Terraform ≥ 1.5) |
+|---|---|---|
+| Cómo actúa | Muta el estado en el acto | Declarativo: se planifica y se aplica |
+| ¿Se ve en `plan`? | No | Sí, antes de tocar nada |
+| ¿Queda en el repo? | No | Sí: código versionado, revisable en un PR |
+| Generar el HCL | A mano | `-generate-config-out` lo escribe solo |
+
+El archivo `imports.tf`, temporal, que se usó:
+
+```hcl
+import {
+  to = aws_route_table.private
+  id = "rtb-0d72256c04bdb191d"
+}
+
+import {
+  to = aws_route_table_association.private
+  id = "subnet-03eb6819b955061da/rtb-0d72256c04bdb191d"
+}
+```
+
+El formato del id compuesto **no se adivina**: está documentado por recurso. Verificado contra la
+doc del provider antes de escribirlo — *"the associated resource ID and Route Table ID separated by
+a forward slash (`/`)"*.
+
+**Lo que genera `-generate-config-out`, y por qué no se mergea tal cual:**
+
+```hcl
+# __generated__ by Terraform from "rtb-0d72256c04bdb191d"
+resource "aws_route_table" "private" {
+  propagating_vgws = []
+  region           = "us-east-1"
+  route            = []
+  tags = {
+    Name = "rt-private-tf-workshop-lm"
+  }
+  tags_all = {
+    Name = "rt-private-tf-workshop-lm"
+  }
+  vpc_id = "vpc-09b6544aea696e9dd"
+}
+```
+
+El propio archivo avisa: *"Please review these resources and move them into your main configuration
+files."* Es una **transcripción literal de la realidad**, no código para producción:
+
+1. **IDs hardcodeados.** Sin referencias (`aws_vpc.main.id`) no hay aristas en el grafo de
+   dependencias: Terraform no sabría que la route table depende de la VPC, y el `destroy` de la
+   Fase 9 podría intentar borrarlas en el orden equivocado.
+2. **`tags_all` escrito en la configuración.** Es un atributo **calculado** — el resultado de fusionar
+   `tags` con los `default_tags`. Declararlo es escribir un resultado donde va una entrada.
+3. **`region` por recurso**, que el provider ya fija.
+4. **`route = []`, `propagating_vgws = []`, `gateway_id = null`**: el generador vuelca todos los
+   atributos, incluidos los vacíos.
+
+El `plan` con la config escrita a mano:
+
+```
+Plan: 2 to import, 0 to add, 1 to change, 0 to destroy.
+
+  # aws_route_table.private will be imported
+      ~ tags_all = {
+          + "Environment" = "dev"
+          + "ManagedBy"   = "Terraform"
+            "Name"        = "rt-private-tf-workshop-lm"
+          + "Repository"  = "terraform-practice-teracloud"
+        }
+```
+
+**Los números importan más que el texto.** `0 to add` es el criterio real de que el import está bien
+planteado: si el HCL describiera otra cosa —otra VPC, otra subnet—, Terraform no reconocería el
+objeto existente y propondría **crear uno nuevo al lado**. Y `1 to change` no era un error de la
+config: `tags` coincidía exacto, lo único que se movía era `tags_all` sumando los 3 `default_tags`.
+
+**"Importado sin diff" casi nunca sale en el primer intento**, y hay dos formas de cerrar la brecha:
+
+- Ajustar el **código** para describir la realidad tal cual está — o sea, excluir este recurso de los
+  `default_tags`. Es deformar el proyecto para acomodar un recurso creado apurado.
+- Aplicar y que la **realidad** converja al código. Es lo correcto: el código es la fuente de verdad.
+
+```
+aws_route_table.private: Import complete [id=rtb-0d72256c04bdb191d]
+aws_route_table_association.private: Import complete [id=subnet-03eb6819b955061da/rtb-0d72256c04bdb191d]
+aws_route_table.private: Modifying... [id=rtb-0d72256c04bdb191d]
+aws_route_table.private: Modifications complete after 1s
+
+Apply complete! Resources: 2 imported, 0 added, 1 changed, 0 destroyed.
+```
+
+Los bloques `import` son **de una sola vez**: una vez que el objeto está en el estado quedan como
+código muerto, reevaluado en cada `plan` sin efecto. Se borró `imports.tf` después del apply, según
+indica la doc de HashiCorp. El `plan` final:
+
+```
+No changes. Your infrastructure matches the configuration.
+```
+
+```bash
+aws ec2 describe-route-tables --route-table-ids rtb-0d72256c04bdb191d --query "RouteTables[].Tags"
+[[ {"Key":"Name","Value":"rt-private-tf-workshop-lm"},
+   {"Key":"Repository","Value":"terraform-practice-teracloud"},
+   {"Key":"Environment","Value":"dev"},
+   {"Key":"ManagedBy","Value":"Terraform"} ]]
+```
+
+**El detalle fino que casi se pasa por alto**: la association se **importó** con
+`subnet-03eb6819b955061da/rtb-0d72256c04bdb191d`, pero el `id` que quedó en el estado es
+`rtbassoc-0979324d6bcf3e620`. El formato compuesto es solo una **dirección de import**, no la
+identidad del objeto. Es distinto del registro DNS de la Fase 7, donde el compuesto **sí** es el
+`id` porque AWS no le da uno propio al `ResourceRecordSet`. Dos casos que se parecen y no son lo
+mismo.
+
+#### Ejercicio 4 — el drift latente que no se puede provocar
+
+El de la AMI (§9). No hace falta tocar nada: `most_recent = true` ya movió el valor de
+`ami-07a5b367e8dc8bd92` a `ami-02b3d83d84b07786d` entre la Fase 1 y la Fase 7. Queda esperando a que
+AWS publique el próximo build de la línea `kernel-6.1` para que un `plan` sin ningún cambio en el
+repo proponga **reemplazar la instancia**. No cambió la infraestructura: cambió lo que el código
+significa.
+
+`CAPTURA PENDIENTE -- consola de EC2, instancia i-038459aacc0d1e104, pestana Tags mostrando
+Name = ec2-tocada-a-mano, tomada antes de correr el apply que revierte el drift`
+
+`CAPTURA PENDIENTE -- consola de VPC, Route tables de vpc-09b6544aea696e9dd: se tienen que ver las
+tres tablas (publica, privada importada y main) con la columna de subnets asociadas`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -1970,6 +2223,11 @@ cambiaron de opinión a mitad de camino.
 | 7 | `allow_overwrite` **omitido**, quedando en su default `false` | Ponerlo en `true` "para que el apply nunca falle" | Con `false`, si el registro ya existiera creado a mano en la zona, el `apply` **falla** en vez de pisarlo en silencio. La doc del provider es explícita: *"This configuration is not recommended for most environments"*. Es exactamente la protección que uno quiere en una hosted zone compartida, donde otro registro `sf` podría ser de otra persona. Mismo criterio que en Fase 4 con `encryption_configuration`: no declarar un default salvo que se lo esté cambiando | No |
 | 7 | El output `game_url` se arma con `aws_route53_record.game.fqdn`, no con una string a mano | `"http://${var.game_name}.${var.domain}"` interpolando las mismas variables | La string a mano describe lo que uno *cree* que creó; `fqdn` es lo que **Route53 efectivamente guardó**, leído del estado post-apply. Si el nombre se normalizara distinto de lo esperado, la string a mano seguiría mostrando la URL linda y equivocada. Además `fqdn` viene ya sin punto final, que es lo que un navegador necesita | No |
 | 7 | El registro va sin `tags` | Agregar `tags = { Name = ... }` por coherencia con todos los demás recursos del repo | No es una decisión de estilo: **los `ResourceRecordSet` de Route53 no soportan tags**. Solo son taggables las hosted zones y los health checks. Es el primer recurso del proyecto donde los `default_tags` del provider no aplican, y conviene dejarlo escrito en el HCL para que no parezca un olvido en la revisión | No |
+| 8 | Tres ejercicios encadenados, con el mismo recurso en el 2 y el 3 | Dos ejercicios sueltos: un drift cualquiera por un lado y un import de algo cualquiera por el otro | Encadenados cuentan una historia: un recurso creado por fuera es invisible → el import es lo que lo vuelve visible. Sueltos son dos demos sin relación. El costo de armarlo así fue cero, porque el recurso a importar ya estaba elegido | No — `DISENO.md` solo fija el criterio de salida, no el guion |
+| 8 | El recurso a importar es la **route table de la subnet privada** | Importar un recurso descartable creado para el ejercicio (un SG vacío, un bucket) | Cierra un hueco real del proyecto en vez de ser un import de juguete: hasta la Fase 7 la subnet privada caía en la **main route table**, que Terraform no administra. Si alguien le agregaba una ruta `0.0.0.0/0`, la subnet se volvía pública y **ningún `plan` lo mostraba**. Además no toca la superficie de seguridad: una route table sin ruta a internet no abre nada | No — agrega al diseño, que no preveía la route table privada |
+| 8 | Bloques `import {}` en vez del comando `terraform import` | `terraform import aws_route_table.private rtb-...` | El comando muta el estado en el acto, sin pasar por `plan` y sin dejar rastro en el repo: no es revisable en un PR y no se puede ensayar. El bloque es declarativo, aparece en el `plan` con su `2 to import` **antes** de tocar nada, y habilita `-generate-config-out`. Se borra después del apply porque es de una sola vez | No |
+| 8 | El HCL generado por `-generate-config-out` se **descarta** y se reescribe a mano | Mover `generated.tf` al repo tal cual, que es lo que invita a hacer | El propio archivo avisa *"Please review these resources and move them into your main configuration files"*. Trae IDs hardcodeados —que rompen el grafo de dependencias y por lo tanto el orden del `destroy`—, `tags_all` (un atributo **calculado**) escrito como si fuera entrada, `region` por recurso, y todos los atributos vacíos volcados. Sirve como **lectura de la realidad**, no como código | No |
+| 8 | Cerrar el `1 to change` del import aplicando, no editando el código | Excluir el recurso importado de los `default_tags` para que el `plan` diera limpio de una | Es la decisión de fondo de todo import: cuando el recurso real y el código no coinciden, **el código es la fuente de verdad y la realidad converge hacia él**. Lo contrario es deformar el proyecto para acomodar un recurso creado apurado a mano, y deja una excepción permanente en el HCL para justificar un error de diez segundos | No |
 
 ---
 
@@ -1998,6 +2256,7 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | Sin health check ni reinicio automático más allá de `--restart unless-stopped` | Alcance del lab | Health check del orquestador que reemplace la tarea cuando deja de responder. `--restart` solo cubre que el proceso muera, no que se cuelgue respondiendo mal |
 | Sin HTTPS: registro A directo a la IP y tráfico por el puerto 80 | El enunciado no pide TLS y no hay ALB donde terminarlo | Certificado de ACM en un ALB, listener 443 y redirect 80→443. Hoy el juego viaja en claro y el navegador lo marca como *Not secure*. Sin ALB no hay dónde poner el certificado: montar TLS en la propia instancia obligaría a renovar con certbot dentro del `user_data` |
 | Registro A no-alias apuntando a una IP, en vez de Alias a un ALB | No hay ALB en el lab, y no existe Alias hacia una IP | El Alias no cobra las consultas y sigue solo al recurso, no a una dirección: la IP del ALB puede cambiar sin tocar el DNS. El registro A acopla el nombre a una IP concreta y hace del TTL un parámetro crítico |
+| La **main route table** de la VPC sigue sin administrar por Terraform, aun después de la Fase 8 | El import cubrió la route table de la subnet privada, que era el hueco funcional. La main quedó vacía de associations y con la sola ruta `local` | Adoptarla con `aws_default_route_table` y dejarla explícitamente **sin rutas**. Es el default de toda subnet que se cree en el futuro: mientras no esté en el estado, alguien puede agregarle una ruta a internet y ninguna subnet sin association explícita lo va a mostrar en un `plan`. El recurso existe justamente para eso — adopta la tabla en el `apply`, sin `terraform import`, y el `destroy` no la borra |
 | Subdominio creado en una hosted zone **compartida** de la empresa, con `allow_overwrite = false` como única protección | Es la zona que provee el onboarding | Zona delegada por proyecto o por entorno, con la política de IAM del rol de despliegue restringida a `route53:ChangeResourceRecordSets` sobre esa zona. Hoy, un error de nombre en `var.game_name` escribiría en la zona de todos, y el permiso de administrador no lo impide |
 
 ---
@@ -2278,6 +2537,32 @@ había terminado. Lo único que podía faltar era cache del lado del cliente, no
 
 ---
 
+### El estado es un inventario parcial, y `refresh` no audita la cuenta
+
+La frase que devuelve Terraform cuando no encuentra drift es
+*"No changes. Your infrastructure still matches the configuration"*, y suena a auditoría de la
+cuenta. No lo es. `refresh` **recorre los recursos que están en el estado**, uno por uno, y le
+pregunta a la API por cada uno. No enumera nada. Todo lo que exista en AWS y no esté en el estado
+es, para Terraform, inexistente — y lo va a seguir siendo por más veces que refresques.
+
+Probado en la Fase 8: una route table creada por CLI, asociada a la subnet privada y ruteando
+tráfico real, con `plan -refresh-only` devolviendo `No changes` y `terraform state list` sin
+mencionarla.
+
+De ahí salen tres consecuencias que valen para cualquier proyecto:
+
+1. **Terraform detecta cambios sobre lo que administra, no recursos que no administra.** Para lo
+   segundo hacen falta otras herramientas: AWS Config, Cloud Custodian, o comparar un `describe`
+   contra el estado.
+2. **El riesgo no es el recurso huérfano en sí, es lo que le cuelga.** El caso concreto de este
+   proyecto era la main route table: mientras no estuviera en el estado, agregarle una ruta
+   `0.0.0.0/0` volvía pública a toda subnet sin association explícita, sin aparecer en ningún `plan`.
+3. **Un `apply` limpio no significa "la cuenta está como el código dice"**, significa "los N recursos
+   que declaré están como los declaré". La diferencia entre las dos frases es todo lo que alguien
+   creó a mano.
+
+---
+
 ## 7. Preguntas que me hice y su respuesta
 
 Las del tipo "¿por qué no simplemente X?". Son las que después permiten defender las decisiones.
@@ -2397,7 +2682,11 @@ un error que parece de PATH y es de distro equivocado. Todo lo que corra Terrafo
 ## 10. Estado al momento de generar la documentación — qué falta y dónde van los placeholders
 
 **Leer esto antes de armar el documento final.** Este repo se congela acá para una primera pasada de
-documentación, con las **Fases 0 a 7 cerradas y verificadas** y las **Fases 8 y 9 sin ejecutar**.
+documentación, con las **Fases 0 a 8 cerradas y verificadas** y la **Fase 9 sin ejecutar**.
+
+> Actualización del 18-ago-2026, más tarde el mismo día: la **Fase 8 se ejecutó** después de escribir
+> esta sección. Sus placeholders quedaron sin efecto y se reemplazaron por el contenido real en §2.
+> Lo único pendiente ahora es la Fase 9.
 
 El documento tiene que salir completo en todo lo que sí se hizo, y **dejar secciones vacías con
 placeholders visibles** para lo que falta — no omitirlas ni inventarlas. La idea es que después se
@@ -2415,35 +2704,17 @@ rellenen sin rehacer el documento.
 | 5 — IAM | §2, §4, §5 |
 | 6 — EC2 + user_data | §2 (del `.tftpl` al HTTP 200), §4 (6 decisiones), §5, §9 (CRLF) |
 | 7 — DNS | §2, §4 (5 decisiones), §5, §6 (`id` compuesto e `INSYNC`), §9 (drift de la AMI) |
+| 8 — Drift e import | §2 (los 4 ejercicios con output literal), §4 (5 decisiones), §5 (main route table), §6 (el estado como inventario parcial) |
 
 ### Lo que falta — dejar placeholder explícito
 
-**Fase 8 — Drift e import. NO EJECUTADA.** El documento tiene que llevar su capítulo con la
-estructura armada y el contenido pendiente. Los tres ejercicios previstos:
-
-1. **Drift provocado a mano.** Cambiar algo por consola (candidato: la descripción de una regla del
-   SG, o un tag de la instancia), y detectarlo con `terraform plan -refresh-only`. Falta: el comando,
-   su output literal, y la explicación de por qué `-refresh-only` no es lo mismo que un `plan` común.
-2. **Import de un recurso creado fuera de Terraform.** Falta: qué recurso, el `id` con el formato
-   exacto que espera el provider, el bloque `import {}` o el `terraform import`, y el `plan` posterior
-   demostrando **cero diff** — que es el único criterio de que el import salió bien.
-3. **Drift "al revés" de la AMI** (ver §9). No hay que provocarlo: ya está latente. Falta: el `plan`
-   del día en que AWS publique el próximo build de `al2023-ami-2023.*-kernel-6.1-x86_64`, mostrando
-   el reemplazo de la instancia sin ningún cambio en el repo.
+**Ejercicio 4 de la Fase 8 — el drift latente de la AMI. NO SE PUEDE PROVOCAR.** Los ejercicios 1 a 3
+están completos en §2. El cuarto depende de que AWS publique el próximo build de
+`al2023-ami-2023.*-kernel-6.1-x86_64`, y el capítulo tiene que dejarlo planteado con su hueco.
 
 ```
-PLACEHOLDER -- Fase 8, ejercicio 1: output literal de terraform plan -refresh-only con el drift
-detectado, y captura de la consola de AWS mostrando el cambio manual antes de correrlo
-```
-
-```
-PLACEHOLDER -- Fase 8, ejercicio 2: comando de import, id compuesto usado, y el plan posterior
-diciendo "No changes"
-```
-
-```
-PLACEHOLDER -- Fase 8, ejercicio 3: plan que propone reemplazo de la instancia por AMI nueva,
-con los dos IDs de AMI visibles en el diff
+PLACEHOLDER -- Fase 8, ejercicio 4: plan que propone reemplazo de la instancia por AMI nueva,
+sin ningun cambio en el repo, con los dos IDs de AMI visibles en el diff
 ```
 
 **Fase 9 — Cierre y `destroy`. NO EJECUTADA.** Falta: el output del `terraform destroy`, el conteo de
@@ -2462,8 +2733,8 @@ como huecos con su leyenda, no eliminadas.
 ### Advertencia sobre la infraestructura viva
 
 Al momento de esta pasada **la infraestructura está corriendo**: la EC2 `i-038459aacc0d1e104` factura
-mientras exista, y el juego responde en `http://sf.luccamedina.ownboarding.teratest.net`. Las Fases 8
-y 9 dependen de que siga viva. Si se destruye antes de ejecutarlas, hay que reconstruirla con
+mientras exista, y el juego responde en `http://sf.luccamedina.ownboarding.teratest.net`. La Fase 9
+depende de que siga viva. Si se destruye antes de ejecutarla, hay que reconstruirla con
 `terraform apply` — el código está completo y el estado en S3, así que es reproducible, pero los IDs
 de la tabla de trazabilidad de §1 **cambian todos** salvo los del bucket y el repositorio ECR.
 

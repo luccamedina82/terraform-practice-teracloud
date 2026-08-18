@@ -55,6 +55,26 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Fase 8: creados a mano por CLI e importados. Hasta la Fase 7 la subnet privada
+# no tenia association propia y caia en la main route table de la VPC, que
+# Terraform no administra: si alguien le agregaba una ruta 0.0.0.0/0, la subnet
+# se volvia publica sin que ningun plan lo mostrara.
+#
+# Sin bloque route: queda solo la ruta local implicita que pone AWS. Ahora la
+# subnet es privada por declaracion, no por omision.
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "rt-private-${local.name}"
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
 resource "aws_security_group" "instance" {
   vpc_id      = aws_vpc.main.id
   name        = "instance-${local.name}"

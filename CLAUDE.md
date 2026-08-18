@@ -106,11 +106,12 @@ Después de cada hito, actualizar `BITACORA.md` con lo que corresponda:
 Regla práctica: **si algo llevó más de diez minutos de resolver, va a la bitácora**, aunque en
 retrospectiva parezca obvio.
 
-### Primera pasada de documentación — 18-ago-2026, con las Fases 8 y 9 sin ejecutar
+### Primera pasada de documentación — 18-ago-2026, con la Fase 9 sin ejecutar
 
 `DISENO.md`, este archivo y `BITACORA.md` se llevan a Claude Desktop para generar el documento con
-la skill `documentacion-tecnica` **antes de terminar el workshop**. Las Fases 0 a 7 están cerradas y
-verificadas; las Fases 8 (drift e import) y 9 (cierre y `destroy`) no se ejecutaron.
+la skill `documentacion-tecnica` **antes de terminar el workshop**. Las Fases 0 a 8 están cerradas y
+verificadas; la Fase 9 (cierre y `destroy`) no se ejecutó, y de la Fase 8 queda pendiente solo el
+cuarto ejercicio —el drift de la AMI—, que depende de que AWS publique un build nuevo.
 
 El documento tiene que **incluir esos capítulos con placeholders visibles**, no omitirlos. La
 instrucción concreta, con el detalle de qué falta en cada uno, está en **`BITACORA.md` §10**, que se
@@ -136,7 +137,7 @@ Actualizar al cerrar cada fase.
 | 5 — IAM | **cerrada** (18-ago-2026) — rol `role-ec2-tf-workshop-lm` · 2 políticas adjuntas · instance profile `AIPARQ4K5WBKHX6MIHWCV` contiene el rol, verificado por CLI |
 | 6 — EC2 + user_data | **cerrada** (18-ago-2026) — `i-038459aacc0d1e104` · IP `3.234.229.254` · SSM `Online` · `user_data termina OK` en 81 s · HTTP 200 desde internet · digest idéntico al pusheado |
 | 7 — DNS | **cerrada** (18-ago-2026) — registro A `sf.luccamedina.ownboarding.teratest.net` → `3.234.229.254`, TTL 60 · `INSYNC` en 35 s · `dig` OK contra el NS autoritativo y contra el resolver · `curl` HTTP 200 |
-| 8 — Drift e import | pendiente |
+| 8 — Drift e import | **cerrada** (18-ago-2026) — drift visible detectado por `plan -refresh-only` y revertido · drift invisible demostrado con `rtb-0d72256c04bdb191d` creada por CLI · importada con bloques `import {}` · `plan` final = `No changes` |
 | 9 — Cierre y destroy | pendiente |
 
 **Decisiones abiertas**: ninguna.
