@@ -30,6 +30,10 @@ Completar con IDs reales al cerrar cada fase.
 | Regla egress total (Fase 2) | `sgr-egress-all-tf-workshop-lm` | `sgr-06ba0b4abc932a07f` | `ip_protocol = -1`, `from`/`to` = `-1`, hacia `0.0.0.0/0` | No |
 | Repositorio ECR (Fase 4) | argumento `name` = `sf-tf-workshop-lm` · tag `Name` = `ecr-sf-tf-workshop-lm` | `104981180500.dkr.ecr.us-east-1.amazonaws.com/sf-tf-workshop-lm` | `MUTABLE` · `scanOnPush = true` · `force_delete = true` · cifrado `AES256` (default, no declarado) · creado `2026-08-18T12:46:16Z` | Sí: se cobra el almacenamiento de las imágenes. 33 MiB es despreciable, pero **el repo sí lo borra `terraform destroy`** gracias a `force_delete` |
 | Imagen del juego (Fase 4, **construida y pusheada a mano**) | `sf-tf-workshop-lm:latest` | `sha256:9dd22a3cef18c5c93eb17d79d4a008d748ea32396f96625d1729421f44b8e6e9` | 34.952.071 B (33 MiB comprimido, 112 MB descomprimido) · `linux/amd64` · manifest `v2` simple · base `nginx:alpine` (nginx 1.31.3) · scan on push `COMPLETE` con **0 hallazgos** | Sí, incluido en el costo del repo |
+| Rol IAM (Fase 5) | `role-ec2-tf-workshop-lm` | `arn:aws:iam::104981180500:role/role-ec2-tf-workshop-lm` | Trust policy: `sts:AssumeRole` para `Service = ec2.amazonaws.com` · `path = /` · `max_session_duration = 3600` · sin políticas inline · creado `2026-08-18T13:14:48Z` | No. IAM no se cobra |
+| Attachment ECR (Fase 5) | — | id compuesto `role-ec2-tf-workshop-lm/arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly` | Habilita el `docker pull` del user_data. Incluye `ecr:GetAuthorizationToken`, que es un permiso a nivel cuenta y no de repositorio | No |
+| Attachment SSM (Fase 5) | — | id compuesto `role-ec2-tf-workshop-lm/arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore` | Habilita Session Manager. Por esto el SG no abre el 22 y no hay key pair en el proyecto | No |
+| Instance profile (Fase 5) | `profile-ec2-tf-workshop-lm` | `AIPARQ4K5WBKHX6MIHWCV` (ARN `arn:aws:iam::104981180500:instance-profile/profile-ec2-tf-workshop-lm`) | Envuelve a `role-ec2-tf-workshop-lm`. Es lo único que la API de EC2 sabe consumir: `RunInstances` no acepta un rol | No |
 
 ---
 
@@ -1009,6 +1013,130 @@ imagen con tag latest, su digest, y la columna de vulnerabilidades del scan on p
 
 ---
 
+### [Fase 5] — IAM: rol, dos attachments e instance profile
+
+Config agregada: `iam.tf`, cuatro recursos. Sin outputs nuevos — nadie consume estos IDs (mismo
+criterio que con el IGW y la route table en la Fase 2).
+
+```bash
+terraform fmt && terraform validate && terraform apply   # Plan: 4 to add
+```
+
+Extracto del `plan`, con los dos campos que importan:
+
+```
+  # aws_iam_role.instance will be created
+  + resource "aws_iam_role" "instance" {
+      + name                  = "role-ec2-tf-workshop-lm"
+      + assume_role_policy    = jsonencode(
+            {
+              + Statement = [
+                  + {
+                      + Action    = "sts:AssumeRole"
+                      + Effect    = "Allow"
+                      + Principal = { + Service = "ec2.amazonaws.com" }
+                    },
+                ]
+              + Version   = "2012-10-17"
+            }
+        )
+      + managed_policy_arns   = (known after apply)
+      + max_session_duration  = 3600
+      + path                  = "/"
+    }
+
+  # aws_iam_instance_profile.instance will be created
+  + resource "aws_iam_instance_profile" "instance" {
+      + name = "profile-ec2-tf-workshop-lm"
+      + role = "role-ec2-tf-workshop-lm"
+    }
+```
+
+**`managed_policy_arns = (known after apply)` es la prueba de que los attachments van por fuera.**
+Terraform sabe que el atributo va a tener contenido pero no lo está gobernando: lo llenan los dos
+`aws_iam_role_policy_attachment`. Si en cambio se hubiera declarado `managed_policy_arns` dentro del
+rol, ahí figuraría la lista literal — y Terraform borraría en cada `apply` cualquier política
+adjuntada por otro medio. Es **el mismo dilema exacto que las reglas de SG inline vs. separadas** de
+la Fase 2, y se resuelve igual: recursos separados, y nunca mezclar los dos estilos sobre el mismo
+rol.
+
+**`role = "role-ec2-tf-workshop-lm"` es el NOMBRE, no el ARN.** Vale para el instance profile y para
+los dos attachments. Poner el ARN es un error frecuente y el mensaje de AWS no es obvio.
+
+Dos defaults que AWS pone y no se escribieron: `path = "/"` (la jerarquía de IAM, que casi nadie
+usa) y `max_session_duration = 3600` — una hora, que es cada cuánto la instancia renueva por IMDS
+las credenciales temporales del rol.
+
+#### Verificación contra la API
+
+```bash
+ROLE=role-ec2-tf-workshop-lm
+aws iam list-instance-profiles-for-role --role-name "$ROLE"
+aws iam list-attached-role-policies     --role-name "$ROLE"
+aws iam get-role                        --role-name "$ROLE"
+aws iam list-role-policies              --role-name "$ROLE"
+aws iam get-instance-profile --instance-profile-name profile-ec2-tf-workshop-lm
+```
+
+```json
+// 1. el instance profile contiene el rol
+[ { "profile": "profile-ec2-tf-workshop-lm",
+    "arn": "arn:aws:iam::104981180500:instance-profile/profile-ec2-tf-workshop-lm",
+    "roles": [ "role-ec2-tf-workshop-lm" ] } ]
+
+// 2. politicas adjuntas
+{ "AttachedPolicies": [
+    { "PolicyName": "AmazonSSMManagedInstanceCore",       "PolicyArn": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" },
+    { "PolicyName": "AmazonEC2ContainerRegistryReadOnly", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly" } ] }
+
+// 3. trust policy
+{ "arn": "arn:aws:iam::104981180500:role/role-ec2-tf-workshop-lm",
+  "created": "2026-08-18T13:14:48Z",
+  "maxSession": 3600,
+  "trust": { "Version": "2012-10-17",
+             "Statement": [ { "Effect": "Allow",
+                              "Principal": { "Service": "ec2.amazonaws.com" },
+                              "Action": "sts:AssumeRole" } ] } }
+
+// 4. politicas inline
+{ "PolicyNames": [] }
+
+// 5. instance profile
+{ "arn": "arn:aws:iam::104981180500:instance-profile/profile-ec2-tf-workshop-lm",
+  "id": "AIPARQ4K5WBKHX6MIHWCV",
+  "roles": [ "role-ec2-tf-workshop-lm" ] }
+```
+
+**Por qué la verificación 1 es la que realmente importa.** Es la única que prueba la relación que
+EC2 va a consumir en la Fase 6. Un rol perfecto y un instance profile perfecto pero **sin la
+asociación entre ambos** dan una instancia que arranca sin credenciales, con un `user_data` que
+falla en el `docker pull` y sin ningún error que apunte a IAM. Las otras cuatro consultas se ven
+lindas y no prueban eso.
+
+**`PolicyNames: []` confirma la elección de estilo**: los attachments adjuntan políticas
+*gestionadas*, no dejan copias inline dentro del rol. Si mañana alguien agrega una política a mano
+por consola, va a aparecer en `list-attached-role-policies` y **Terraform no la va a borrar**, que
+es justamente el comportamiento que se eligió.
+
+**El prefijo del ID dice el tipo de objeto.** `AIPARQ4K5WBKHX6MIHWCV` — `AIPA` es instance profile,
+igual que `AIDA` es usuario IAM (visto en el `sts get-caller-identity` de la Fase 0) y `AROA` un
+rol. Sirve cuando aparece un ID suelto en un log de CloudTrail y no hay contexto.
+
+#### La consecuencia de diseño de `AmazonSSMManagedInstanceCore`
+
+Esa política es lo que habilita Session Manager, y por eso **el SG de la Fase 2 no tiene ninguna
+regla en el puerto 22 y no hay key pair en ningún lado del proyecto**. El agente de SSM sale hacia
+los endpoints del servicio usando la regla de egress, y la sesión entra por ese canal ya
+establecido. No hace falta abrir ningún puerto de entrada.
+
+Es un buen ejemplo de una decisión de IAM que determina la superficie de red: el permiso reemplaza
+a un puerto abierto.
+
+`CAPTURA PENDIENTE -- consola de IAM, rol role-ec2-tf-workshop-lm: pestana Permissions con las dos
+politicas gestionadas, y pestana Trust relationships con el principal ec2.amazonaws.com`
+
+---
+
 ## 3. Troubleshooting real
 
 Un bloque por problema **realmente ocurrido**. No hipotéticos.
@@ -1353,6 +1481,105 @@ Un bloque por problema **realmente ocurrido**. No hipotéticos.
 
 ---
 
+### `Error acquiring the state lock`: un `plan` matado a mitad deja el lock huérfano en S3
+
+- **Fase**: 5 (ocurrió mientras se planificaba el IAM, pero es un problema del backend de la Fase 3)
+
+- **Síntoma**: un `terraform plan` que había funcionado minutos antes empezó a fallar, y el fallo
+  además tardaba dos minutos en aparecer:
+
+  ```
+  rc=1
+  Error: Error acquiring the state lock
+  Error message: operation error S3: PutObject, https response error
+  ```
+
+  Detalle que casi lo hace invisible: el primer intento se lanzó con la salida filtrada por `grep`,
+  así que **el error se descartó junto con el resto del output** y el comando devolvió cero líneas
+  sin ninguna pista. Se vio recién al volver a correrlo guardando la salida completa a un archivo.
+
+- **Causa raíz**: se lanzó un script con **dos `terraform plan` seguidos**, sabiendo que cada uno
+  tarda cerca de un minuto contra el backend S3. El segundo tomó el lock y el proceso fue **matado
+  antes de terminar**, al superarse el timeout de la herramienta que lo había lanzado. Terraform
+  libera el lock al finalizar; si se lo mata, no lo libera. El objeto `.tflock` quedó en el bucket
+  sin dueño, y todo `plan` posterior se quedó esperando hasta agotar su `-lock-timeout`.
+
+  El historial de versiones del bucket lo reconstruye entero, porque el versioning conserva cada
+  lock y cada delete marker:
+
+  ```bash
+  aws s3api list-object-versions --bucket tf-state-workshop-lm-104981180500 \
+    --prefix tf-workshop/terraform.tfstate.tflock \
+    --query '{versiones:Versions[].{mod:LastModified,size:Size},borrados:DeleteMarkers[].{mod:LastModified}}'
+  ```
+
+  ```
+  12:25:12 -> 12:25:27   init -migrate-state    lock + unlock
+  12:26:15 -> 12:26:25   plan                   lock + unlock
+  12:44:37 -> 12:44:48   plan                   lock + unlock
+  12:46:01 -> 12:46:19   apply del ECR          lock + unlock
+  13:03:00 -> 13:03:11   plan                   lock + unlock
+  13:03:21 -> (nada)     plan                   LOCK HUERFANO
+  ```
+
+  Y el contenido del objeto dice quién lo dejó y cuándo:
+
+  ```json
+  {"ID":"6e6c1970-8301-860b-8a1e-029b1bc14ec1","Operation":"OperationTypePlan","Info":"",
+   "Who":"lucca@LUQUITA","Version":"1.15.8","Created":"2026-08-18T13:03:20.199973691Z",
+   "Path":"tf-state-workshop-lm-104981180500/tf-workshop/terraform.tfstate"}
+  ```
+
+- **Verificaciones hechas ANTES de romper el lock** (esta parte es la que importa, `force-unlock`
+  a ciegas es peligroso):
+
+  | Chequeo | Comando | Resultado |
+  |---|---|---|
+  | ¿Hay algún Terraform vivo? | `pgrep -a terraform` | **ninguno** |
+  | ¿Qué operación tenía el lock? | contenido del `.tflock` | `OperationTypePlan` — **no** un apply |
+  | ¿Hace cuánto? | `Created` vs. hora actual | ~7 minutos, sin actividad |
+  | ¿El estado está sano? | `list-objects-v2` | 26.197 B, última escritura 12:46:19 (el apply del ECR) |
+
+  El segundo punto es el que baja el riesgo casi a cero: **un `plan` no escribe el estado.** Romper
+  el lock de un `plan` muerto no puede corromper nada. El caso peligroso de `force-unlock` es el
+  opuesto — un `apply` que **sigue corriendo** y al que se le saca el lock por abajo: ahí quedan dos
+  procesos escribiendo el mismo objeto, que es exactamente lo que el lock existe para impedir.
+
+- **Fix aplicado**:
+
+  ```bash
+  terraform force-unlock 6e6c1970-8301-860b-8a1e-029b1bc14ec1
+  ```
+
+  Pide confirmación interactiva (`yes`) por TTY. Después el `plan` volvió a correr normal y dio
+  `4 to add`.
+
+- **Lecciones**, tres:
+
+  1. **El lock funcionó exactamente como tiene que funcionar.** No es una anécdota de que "se
+     rompió algo": los `plan` posteriores **se negaron a correr** en vez de operar sobre un estado
+     que creían disponible. Sin `use_lockfile` no habría habido error — habría habido dos procesos
+     escribiendo el mismo objeto, que es peor y silencioso.
+  2. **Nunca filtrar la salida de un comando que puede fallar.** El primer intento pasaba el
+     `plan` por `grep` y el error se fue con el filtro, dejando cero líneas y ninguna pista.
+     Guardar a archivo y filtrar sobre el archivo cuesta lo mismo y conserva la evidencia.
+  3. **Un `plan` contra un backend remoto no es gratis ni instantáneo** — acá tarda cerca de un
+     minuto entre adquirir el lock, refrescar 13 recursos contra la API y liberar. Encadenar dos en
+     un mismo comando con timeout es pedir que uno muera con el lock tomado.
+
+- **Cómo se habría evitado**: una sola corrida, salida a archivo, y filtros sobre el archivo.
+
+  ```bash
+  terraform plan -no-color > /tmp/plan.txt 2>&1; echo "rc=$?"
+  grep '# aws_' /tmp/plan.txt
+  grep -E 'Plan:|No changes|Error' /tmp/plan.txt
+  ```
+
+- **Tiempo aproximado**: ~12 min, casi todos gastados en dos timeouts de 120 s esperando un lock
+  que nunca se iba a liberar.
+
+---
+
 ## 4. Decisiones tomadas durante la ejecución
 
 Las que no estaban en `DISENO.md` o que lo contradicen. Incluir explícitamente las que
@@ -1388,6 +1615,10 @@ cambiaron de opinión a mitad de camino.
 | 4 | `docker build --provenance=false` | Dejar el default de buildx | Buildx exporta por defecto un *attestation manifest* junto a la imagen y convierte el push en una manifest list. En ECR eso aparece como **una segunda entrada con plataforma `unknown/unknown`** al lado de la imagen real, y el escaneo la reporta aparte. Con el flag el manifest quedó `v2` simple. Verificado: `imageManifestMediaType = application/vnd.docker.distribution.manifest.v2+json` | No |
 | 4 | `game_name` como variable, no string en el recurso | Escribir `"sf"` directo en `aws_ecr_repository.name` | Un solo valor alimenta dos puntas separadas por tres fases: el nombre del repo ECR (Fase 4) y el subdominio del registro DNS (Fase 7). Cambiar de juego es cambiar una línea. Sigue el criterio adoptado en Fase 2 | No |
 | 4 | `encryption_configuration` **omitido** a propósito | Declararlo con `encryption_type = "AES256"` | El default ya es `AES256` con clave gestionada por AWS — verificado en el `describe-repositories` post-apply. Declarar un default sin cambiarlo agrega ruido al HCL y hace creer que hubo una decisión donde no la hubo. Si hiciera falta CMK propia sería `encryption_type = "KMS"` + `kms_key` | No |
+| 5 | Trust policy escrita con `jsonencode({...})` | Heredoc con JSON crudo, o `data "aws_iam_policy_document"` | El heredoc es un string opaco: un error de sintaxis JSON recién aparece en el `apply`, contra la API. Con `jsonencode` el objeto es HCL, lo chequea `validate`, y las interpolaciones son normales. `aws_iam_policy_document` vale la pena cuando hay condiciones y statements múltiples — para una trust policy de cinco líneas agrega ceremonia sin ganancia | No — el diseño no fijaba la forma |
+| 5 | `aws_iam_role_policy_attachment` como recursos separados | `managed_policy_arns` dentro del `aws_iam_role` | **Es el mismo dilema que las reglas de SG inline vs. separadas de la Fase 2, y se resuelve igual.** `managed_policy_arns` es exclusivo: Terraform saca del rol cualquier política adjuntada por fuera, en cada `apply`. El attachment separado convive. Se ve en el `plan`: con attachments, el rol muestra `managed_policy_arns = (known after apply)` — sabe que va a tener contenido pero no lo gobierna. Lo que nunca hay que hacer es mezclar los dos estilos sobre el mismo rol | No |
+| 5 | Sin outputs para el rol ni el instance profile | Exportar sus ARNs "por las dudas" | Mismo criterio que en la Fase 2 con el IGW y la route table: un output existe para que alguien lo consuma. Estos IDs no los referencia ninguna fase posterior — la EC2 de la Fase 6 referencia el recurso directamente, no un output — ni ningún comando de verificación. Un output que nadie lee es ruido en cada `apply` | No |
+| 5 | Session Manager en lugar de SSH, decidido desde IAM y no desde la red | Key pair + regla de ingress en el 22 | Es una decisión de IAM que **determina la superficie de red**: con `AmazonSSMManagedInstanceCore` el agente sale hacia los endpoints de SSM por la regla de egress y la sesión entra por ese canal ya establecido, así que no hace falta abrir ningún puerto de entrada ni distribuir una clave privada. Explica retroactivamente por qué el SG de la Fase 2 no tiene el 22 | No — `DISENO.md` ya listaba la política; acá se documenta la consecuencia |
 
 ---
 
@@ -1408,6 +1639,8 @@ Cada vez que algo se hace "porque es un lab", va acá. Base inicial en `DISENO.m
 | `force_delete = true` en el repositorio ECR | Sin esto el `terraform destroy` de la Fase 9 falla con `RepositoryNotEmptyException` y deja el destroy a medias | Sin `force_delete`: el borrado de un repositorio con imágenes tiene que ser una decisión explícita y no un efecto colateral de un `destroy`. Las imágenes son artefactos con trazabilidad, no basura recreable |
 | Assets del juego (sprites, música) con copyright de Capcom, repo fuente sin licencia | Es un lab interno con una URL efímera que se destruye en la Fase 9 | Contenido propio o con licencia verificada. Publicar esto como producto es un problema legal, no técnico |
 | Imagen construida y pusheada desde la notebook, con las access keys personales | Es el paso didáctico que pide el enunciado | Build y push desde el pipeline de CI/CD, con OIDC, tag = SHA del commit, y el registry como única fuente de artefactos desplegables |
+| `AmazonEC2ContainerRegistryReadOnly` (política gestionada por AWS) en vez de una propia | Es la que pide el enunciado y evita escribir una política a mano en un lab | Da lectura sobre **todos** los repositorios de la cuenta, no solo el del juego, e incluye `ecr:GetAuthorizationToken` a nivel cuenta. En producción: política propia con `Resource` apuntando al ARN del repositorio concreto. Las políticas gestionadas de AWS son un punto de partida cómodo y casi nunca son de mínimo privilegio |
+| Un solo rol para las dos responsabilidades (pull de ECR y acceso por SSM) | Alcance del lab: una instancia, un propósito | Separación por función, con roles distintos para el acceso operativo y para el consumo de artefactos. Acá cualquiera que consiga una sesión por SSM hereda también el permiso de lectura sobre todo ECR |
 
 ---
 

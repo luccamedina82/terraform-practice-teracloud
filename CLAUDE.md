@@ -118,7 +118,7 @@ Actualizar al cerrar cada fase.
 | 2 — Red | **cerrada** (18-ago-2026) — `apply` OK, 10 recursos managed · verificado por CLI contra la API · VPC `vpc-09b6544aea696e9dd` · SG `sg-0b1c39e081bc25b04` |
 | 3 — Migración a backend S3 | **cerrada** (18-ago-2026) — `init -migrate-state` OK · objeto en S3 cifrado y versionado · 10 managed + 2 data preservados · `plan` = `No changes` |
 | 4 — ECR + push de la imagen | **cerrada** (18-ago-2026) — repo `sf-tf-workshop-lm` · imagen propia sobre `nginx:alpine` · `list-images` devuelve `latest` · scan on push con **0 hallazgos** |
-| 5 — IAM | pendiente |
+| 5 — IAM | **cerrada** (18-ago-2026) — rol `role-ec2-tf-workshop-lm` · 2 políticas adjuntas · instance profile `AIPARQ4K5WBKHX6MIHWCV` contiene el rol, verificado por CLI |
 | 6 — EC2 + user_data | pendiente |
 | 7 — DNS | pendiente |
 | 8 — Drift e import | pendiente |
